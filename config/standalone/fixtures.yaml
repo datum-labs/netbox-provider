@@ -1,0 +1,30 @@
+# Synthetic records only. The source points at a reserved .invalid name, so it
+# demonstrates the fail-closed path: SourceObserved and Ready stay Unknown.
+apiVersion: fleet.datumapis.com/v1alpha1
+kind: Facility
+metadata: {name: example-premises-a, namespace: netbox-inventory}
+spec:
+  displayName: Example premises A
+---
+apiVersion: netbox.miloapis.com/v1alpha1
+kind: NetBoxMapping
+metadata: {name: example, namespace: netbox-provider-system}
+spec:
+  revision: example-reviewed-1
+  facilities:
+    - {sourceType: Location, sourceID: 10, facilityRef: {name: example-premises-a}}
+  devices:
+    - {id: 1000, classification: Physical, serialMeaning: Chassis, placement: RackMembership}
+  exclusions:
+    - {roleSlugs: [hosted-vm], reason: hosted virtual machines recorded in DCIM are not physical assets}
+---
+apiVersion: netbox.miloapis.com/v1alpha1
+kind: NetBoxSource
+metadata: {name: example, namespace: netbox-provider-system}
+spec:
+  url: https://netbox.example.invalid
+  sourceID: example-netbox
+  tokenSecretRef: {name: example-netbox-token}
+  mappingRef: {name: example}
+  target: {namespace: netbox-inventory, writer: Operator}
+  mode: Observe

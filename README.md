@@ -1,212 +1,132 @@
-# controller-template
+# netbox-provider
 
-A production-ready starting point for building Kubernetes controller services on the Milo platform. Fork this once and you get a working kubebuilder v4 controller, example CRD with reconciler/finalizer/conditions, defaulting and validating webhooks, a full Kustomize deployment tree, a Remix UI, Taskfile-based dev workflow, GitHub Actions CI, and a Claude Code integration that guides you through naming and initialization before you write a single line of code.
+A Kubernetes controller that imports physical inventory from NetBox into Fleet.
+It reads NetBox, compares it with the Fleet inventory records that already
+exist, and reports a plan. When you opt in, it creates the records that are
+missing. It never changes, adopts or deletes an existing record.
 
-This template exists because building all of that from scratch — correctly — takes days. Forking this takes minutes.
+Fleet does not know this controller or NetBox exists. Fleet sees ordinary
+inventory records holding only physical facts; this controller correlates them
+with NetBox through its own `netbox.miloapis.com/*` labels and annotations. It
+targets Fleet's inventory schema without authorship fields (datum-cloud/fleet#105
+and #106) and needs the create-only importer role (#101).
 
----
+Generated from [`milo-os/controller-template`](https://github.com/milo-os/controller-template)
+(kubebuilder v4). Tested against a synthetic NetBox and Fleet's vendored CRD
+only; it has not run against a real NetBox or Milo control plane.
 
-## Using with Claude Code
+## How it works
 
-This template is designed for AI-assisted development. Claude Code has first-class support baked in: a session hook, a `/init-service` command, and a `CLAUDE.md` that gives Claude full context about the codebase conventions.
+You create two resources in the controller's own cluster:
 
-### First open: automatic product discovery
+- a **NetBoxSource**: the NetBox URL, a Secret holding a read-only API token,
+  a stable source ID, an optional site scope, and the Fleet namespace to write
+  to; and
+- a **NetBoxMapping**: your reviewed decisions. It maps NetBox sites and
+  locations to existing Fleet Facilities, and says for each device whether it
+  is physical, what its serial field means, and how precisely to place it.
 
-When you open this repo in Claude Code for the first time (before initialization), a session hook fires automatically. Claude starts a product discovery conversation:
+Each reconcile reads NetBox and the Fleet namespace completely, then plans.
+Each Fleet record in the plan gets one outcome:
 
-1. It silently researches the existing `milo-os` services on GitHub to understand what already exists, which API groups are taken, and which naming patterns are used across the org.
-2. It asks what you're trying to build — starting with the problem, not the name.
-3. It proposes a service name, API group, and primary resource kind based on your description and the existing ecosystem. It will flag if something similar already exists.
-4. Once you confirm the design, it runs `hack/rename.sh` with the agreed values and creates the `.claude/.initialized` marker.
+| Outcome | Meaning |
+| --- | --- |
+| Create | Missing from Fleet and safe to create. |
+| Unchanged | Already in Fleet from this source with the same facts. |
+| Quarantined | Conflicts with an existing record, such as a name owned by another writer or a matching serial. Nothing is written. |
+| Unresolved | Needs a mapping decision, or depends on something blocked. |
 
-You never touch the rename script manually. Claude runs it for you after you've agreed on the design.
+In the default `Observe` mode nothing is written. Set `spec.mode: Create` to
+create the planned records: racks first, then device claims, then devices. The
+status lists conflicts first and never contains serials or tokens. Any failed
+or uncertain read or write is reported as `Unknown`, never `Ready`.
 
-### After initialization
+It imports racks, device claims and devices. Facilities stay operator-owned.
+Cables, power, components, circuits and Sites are not imported yet.
 
-Once initialized, Claude Code has full context via `CLAUDE.md` to help you develop the service iteratively:
+Read the [design](docs/architecture/design.md) for the full rules, and the
+[Fleet usage](docs/architecture/fleet-contract.md) for exactly what it writes
+and the one Fleet dependency, the create-only importer role.
 
-- Adding new resource types (`kubebuilder create api`)
-- Writing reconciler logic
-- Adding validation rules to webhooks
-- Extending the Remix UI with new routes and components
-- Generating and applying manifests
+## Deploy
 
-This is not a one-time scaffold. It's a development partner for the full lifecycle of the service.
+The deployment layout follows Fleet's. Consumers apply
+`config/overlays/management-plane` from the published
+`ghcr.io/datum-labs/netbox-provider-kustomize` bundle and supply the
+environment-owned ConfigMap, Milo kubeconfig, token Secrets, NetBoxSources and
+NetBoxMappings described in [config/README.md](config/README.md). Fleet records
+are written through Milo IAM in the provider project, never local RBAC.
 
-### Manual trigger
+Records carry only physical facts; the link to NetBox is in this controller's
+labels and annotations. A Device is created only when its NetBox serial is a
+reviewed chassis serial; otherwise its DeviceClaim is created and the Device is
+reported Unresolved.
 
-If you want to restart the discovery flow, run:
+Review a source's plan in Observe mode first; use a dedicated NetBox account
+with a read-only token. When the plan is what you expect, opt in:
 
-```
-/init-service
-```
-
----
-
-## Prerequisites
-
-| Tool | Version | Install |
-|------|---------|---------|
-| Go | 1.25+ | https://go.dev/dl |
-| Docker | recent | https://docs.docker.com/get-docker |
-| kind | v0.20+ | `go install sigs.k8s.io/kind@latest` |
-| Task | v3+ | https://taskfile.dev/installation |
-| pnpm | v9+ | `npm install -g pnpm` |
-| kubebuilder | v4 (reference) | https://book.kubebuilder.io/quick-start |
-| gh | any | https://cli.github.com |
-
-kubebuilder is listed as a reference tool — you need it to add new API types after initialization, but not for the initial setup.
-
----
-
-## Getting started manually
-
-If you're not using Claude Code, run the rename script yourself after forking:
-
-```bash
-chmod +x hack/rename.sh
-./hack/rename.sh \
-  --service-name billing \
-  --api-group billing.miloapis.com \
-  --kind BillingAccount
-```
-
-Use `--dry-run` to preview changes without writing anything.
-
-The script replaces all template placeholders throughout the codebase:
-
-| Placeholder | Replaced with |
-|-------------|---------------|
-| `controller-template` | `--service-name` (e.g. `billing`) |
-| `example.miloapis.com` | `--api-group` (e.g. `billing.miloapis.com`) |
-| `Resource` | `--kind` (e.g. `BillingAccount`) |
-| `resource` | lowercase kind (e.g. `billingaccount`) |
-| `ControllerTemplateOperator` | `<Kind>Operator` |
-| `CONTROLLER_TEMPLATE_API_` | `<SERVICE>_API_` env prefix |
-| `go.miloapis.com/controller-template` | `go.miloapis.com/<service-name>` |
-
-File and directory names containing these strings are renamed as well.
-
-After renaming, verify no placeholders remain:
-
-```bash
-grep -r "controller-template\|example\.miloapis\.com" \
-  --include="*.go" --include="*.yaml" --include="*.ts" --include="*.tsx" .
+```sh
+kubectl get netboxsources -n netbox-provider-system -o yaml   # status.plan, status.records
+kubectl patch netboxsource example -n netbox-provider-system --type merge -p '{"spec":{"mode":"Create"}}'
 ```
 
-An empty result means all placeholders were replaced. Hits in `zz_generated.*` files are expected and will be overwritten in the next step.
+To try it locally, `task standalone:setup` deploys the synthetic
+[standalone root](config/standalone) into a disposable kind cluster.
 
-Then regenerate and verify the build:
+## Development
 
-```bash
-task generate && task manifests
-task build && task test
+You need Go (the toolchain in `go.mod` is fetched automatically), Task,
+[`setup-envtest`](https://pkg.go.dev/sigs.k8s.io/controller-runtime/tools/setup-envtest),
+kustomize, and Bash. Docker and kind are only needed for `task standalone:setup`.
+
+```sh
+task generate     # deepcopy code (controller-gen)
+task manifests    # config/base/crd/netbox.miloapis.com.yaml from kubebuilder markers
+task build        # bin/netbox-provider
+task test         # go test ./... with envtest assets for Kubernetes 1.31.0
+task lint         # golangci-lint
+task validate     # gofmt, go vet, manifests:validate, doc links and whitespace
+task manifests:validate  # render every kustomize entry point
+task standalone:setup    # kind cluster, vendored Fleet CRDs, synthetic standalone root
 ```
 
----
+`task test` runs:
 
-## Local development
-
-Bootstrap a local kind cluster and deploy the controller:
-
-```bash
-task dev:setup
+```sh
+KUBEBUILDER_ASSETS="$(setup-envtest use 1.31.0 -p path)" go test -timeout 10m ./... -count=1
 ```
 
-This creates a kind cluster (via the shared test-infra Taskfile), builds the controller image, loads it into kind, waits for cert-manager, and applies the dev Kustomize overlay. Expect it to take a couple of minutes on first run.
+Without Task:
 
-After making code changes:
-
-```bash
-task dev:redeploy
+```sh
+go build ./...
+go vet ./...
+test -z "$(gofmt -l ./api ./cmd ./internal ./test)"
+KUBEBUILDER_ASSETS="$(setup-envtest use 1.31.0 -p path)" go test ./...
+go test -race ./...   # also needs KUBEBUILDER_ASSETS
+bin/golangci-lint run ./...
+kustomize build config/base/crd >/dev/null
+kustomize build config/overlays/management-plane >/dev/null
+kustomize build config/standalone >/dev/null
+kustomize build test/fleet/crds >/dev/null
+bash hack/validate-doc-links.sh
 ```
 
-This rebuilds the image, loads it into the kind cluster, and cycles the controller pod. Faster than a full `dev:setup`.
+The first `task` run asks you to trust the remote test-infra Taskfile; pass
+`--yes` to accept. `task generate` and `task manifests` install pinned tools
+into `bin/`.
 
-Start the Remix UI dev server:
+| Tests | What they prove |
+| --- | --- |
+| `internal/netbox` | GET-only reads, path prefixes, auth schemes, pagination safety, scope-filter preservation, count and ID consistency, byte, page and record limits, redirects, cancellation, no partial results, no response bodies in errors, field allowlisting, stable digests |
+| `internal/plan` | Facility mapping, location precedence, serial meanings, placement scopes, stable names, unchanged records, quarantines for name conflicts, differing records, duplicate sources and identity collisions, dependency blocking, retention of omitted sources |
+| `internal/controller` (envtest) | Generated records pass the vendored Fleet CRD admission; this controller's CRD validation; observe-only default; opt-in create then no-op; existing-name rejection; identity quarantine; no deletion on omission; NetBox and Fleet failures as Unknown; token Secret handling; manager wiring |
+| `cmd/.../cmd`, `internal/config` | The template's instrumentation adoption test; operator config defaults |
 
-```bash
-task ui:dev   # http://localhost:3000
-```
+The envtest suite installs this repository's CRDs and the
+[vendored Fleet inventory CRD](test/fleet/README.md). All fixtures are
+synthetic; no test contacts a real NetBox or cluster.
 
-The UI connects to the Kubernetes API server using environment variables. Copy `ui/.env.example` to `ui/.env` and configure:
+## Repository rules
 
-```bash
-# Option 1: explicit credentials
-<SERVICE>_API_SERVER_URL=https://your-api-server:6443
-<SERVICE>_API_CA_FILE=/path/to/ca.crt
-<SERVICE>_API_TOKEN_FILE=/path/to/token
-
-# Option 2: local kubeconfig (dev default)
-# Leave the URL unset — falls back to .test-infra/kubeconfig automatically
-```
-
-Run Chainsaw end-to-end tests:
-
-```bash
-task e2e
-```
-
----
-
-## Project structure
-
-```
-controller-template/
-├── cmd/controller-template/    # Binary entrypoint
-├── api/v1alpha1/               # CRD type definitions (*_types.go)
-├── internal/
-│   ├── config/                 # Operator config type (kubeconfigPath, etc.)
-│   └── controller/             # Reconciler — finalizer, conditions, status
-├── internal/webhook/v1alpha1/  # Defaulting + validating webhook
-├── config/
-│   ├── base/                   # Core manifests (CRD, RBAC, webhook, manager)
-│   ├── components/             # Optional overlayable components
-│   └── overlays/               # dev and prod environment overlays
-├── ui/                         # Remix UI (React + datum-ui, Tailwind)
-│   ├── app/routes/             # File-based Remix routes
-│   └── app/lib/                # k8s server client, kubeconfig, types
-├── test/e2e/                   # Chainsaw test cases
-└── hack/
-    └── rename.sh               # One-shot placeholder replacement script
-```
-
----
-
-## Task reference
-
-| Task | What it does |
-|------|-------------|
-| `task build` | Compile the controller binary |
-| `task test` | Run Go tests |
-| `task lint` | Run golangci-lint |
-| `task generate` | Generate deepcopy and defaulter code |
-| `task manifests` | Generate CRD, RBAC, and webhook manifests |
-| `task dev:setup` | Create kind cluster and deploy controller |
-| `task dev:redeploy` | Rebuild image and cycle the controller pod |
-| `task ui:dev` | Start Remix UI at http://localhost:3000 |
-| `task ui:build` | Production build of the UI |
-| `task ui:type-check` | TypeScript type check |
-| `task e2e` | Run Chainsaw e2e tests |
-
----
-
-## Connecting to the Milo control plane
-
-The operator config supports a `kubeconfigPath` field that points the controller at Milo's API server instead of its local cluster:
-
-```yaml
-apiVersion: apiserver.config.miloapis.com/v1alpha1
-kind: ControllerTemplateOperator
-metricsServer:
-  bindAddress: "0"
-kubeconfigPath: /etc/milo/kubeconfig
-```
-
-When `kubeconfigPath` is empty, the controller falls back to in-cluster config — the default for local kind development.
-
----
-
-## Deploying
-
-The repository includes a GitHub Actions publish workflow that triggers on merge to `main`. It builds and pushes the controller Docker image and Kustomize bundles to `ghcr.io/milo-os/<service-name>`. No additional configuration is needed beyond setting the standard `GITHUB_TOKEN` secret, which Actions provides automatically.
+See [AGENTS.md](AGENTS.md) and [CLAUDE.md](CLAUDE.md).

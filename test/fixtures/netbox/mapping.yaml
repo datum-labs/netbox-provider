@@ -1,0 +1,36 @@
+# Synthetic reviewed mapping for the fixture collections in this directory.
+apiVersion: netbox.miloapis.com/v1alpha1
+kind: NetBoxMapping
+metadata:
+  name: example
+spec:
+  revision: example-reviewed-1
+  facilities:
+    - sourceType: Location
+      sourceID: 10
+      facilityRef:
+        name: example-premises-a
+  devices:
+    - id: 1000
+      classification: Physical
+      serialMeaning: Chassis
+      placement: RackMembership
+    - id: 1001
+      classification: Physical
+      serialMeaning: ProviderHostID
+      placement: RackMembership
+    - id: 1002
+      classification: Physical
+      serialMeaning: Unknown
+      placement: Facility
+    - id: 1005
+      classification: Physical
+      serialMeaning: Unknown
+      placement: RackMembership
+    - id: 1006
+      classification: Physical
+      serialMeaning: Chassis
+      placement: RackMembership
+  exclusions:
+    - roleSlugs: [hosted-vm]
+      reason: hosted virtual machines recorded in DCIM are not physical assets

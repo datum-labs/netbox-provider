@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: netbox-provider-manager-config
+  namespace: netbox-provider-system
+data:
+  config.yaml: |
+    apiVersion: apiserver.config.miloapis.com/v1alpha1
+    kind: NetBoxSourceOperator
+    metricsServer:
+      bindAddress: "0"

@@ -1,0 +1,32 @@
+# Synthetic, same-cluster test environment. Never reference it from a
+# production root. Install test/fleet/crds first (task standalone:deploy).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+commonAnnotations:
+  netbox.miloapis.com/standalone-only: "true"
+resources:
+  - ../base/crd
+  - ../base/manager
+  - namespaces.yaml
+  - config.yaml
+  - runtime-secret.yaml
+  - rbac.yaml
+  - fixtures.yaml
+images:
+  - name: ghcr.io/datum-labs/netbox-provider
+    newName: netbox-provider
+    newTag: standalone-local
+patches:
+  # Same cluster: Fleet inventory is served locally, so there is no Milo
+  # kubeconfig to mount.
+  - target:
+      kind: Deployment
+      name: netbox-provider-manager
+    patch: |-
+      - op: remove
+        path: /spec/template/spec/containers/0/volumeMounts/1
+      - op: remove
+        path: /spec/template/spec/volumes/1
+      - op: replace
+        path: /spec/template/spec/containers/0/imagePullPolicy
+        value: Never

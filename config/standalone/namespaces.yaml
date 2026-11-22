@@ -1,0 +1,7 @@
+# Stand-in for the Milo provider project namespace that holds Fleet inventory.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: netbox-inventory
+  labels:
+    netbox.miloapis.com/local-project-stand-in: "true"

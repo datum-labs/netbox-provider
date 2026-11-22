@@ -5,20 +5,24 @@
 domain: miloapis.com
 layout:
 - go.kubebuilder.io/v4
-projectName: controller-template
-repo: go.miloapis.com/controller-template
+projectName: netbox-provider
+repo: go.miloapis.com/netbox-provider
 resources:
 - api:
     crdVersion: v1
     namespaced: true
   controller: true
   domain: miloapis.com
-  group: example
-  kind: Resource
-  path: go.miloapis.com/controller-template/api/v1alpha1
+  group: netbox
+  kind: NetBoxSource
+  path: go.miloapis.com/netbox-provider/api/v1alpha1
   version: v1alpha1
-  webhooks:
-    defaulting: true
-    validation: true
-    webhookVersion: v1
+- api:
+    crdVersion: v1
+    namespaced: true
+  domain: miloapis.com
+  group: netbox
+  kind: NetBoxMapping
+  path: go.miloapis.com/netbox-provider/api/v1alpha1
+  version: v1alpha1
 version: "3"

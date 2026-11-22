@@ -2,14 +2,16 @@ version: '3'
 
 vars:
   TOOL_DIR: "{{.USER_WORKING_DIR}}/bin"
-  IMAGE_NAME: "ghcr.io/milo-os/controller-template"
-  IMAGE_TAG: "dev"
+  # The standalone root replaces the published image with this local one.
+  IMAGE_NAME: "netbox-provider"
+  IMAGE_TAG: "standalone-local"
   TEST_INFRA_CLUSTER_NAME: "test-infra"
   TEST_INFRA_REPO_REF: 'v0.6.0'
   CONTROLLER_TOOLS_VERSION: "v0.17.3"
   DEFAULTER_GEN_VERSION: "v0.37.1"
   GOLANGCI_LINT_VERSION: "v2.15"
   CHAINSAW_VERSION: "v0.2.15"
+  ENVTEST_K8S_VERSION: "1.31.0"
 
 includes:
   # Must set TASK_X_REMOTE_TASKFILES=1 to use this feature.
@@ -40,29 +42,31 @@ tasks:
     silent: true
 
   manifests:
-    desc: Generate CRD, RBAC, and webhook manifests
+    desc: Generate config/base/crd/netbox.miloapis.com.yaml from the API types (RBAC is hand-written; see config/README.md)
     cmds:
       - |
         set -e
         echo "Generating manifests..."
-        {{.TOOL_DIR}}/controller-gen rbac:roleName=controller-template-manager \
-          crd:generateEmbeddedObjectMeta=true \
-          webhook \
+        out="$(mktemp -d)"
+        trap 'rm -rf "$out"' EXIT
+        {{.TOOL_DIR}}/controller-gen crd:generateEmbeddedObjectMeta=true \
           paths="./..." \
-          output:crd:artifacts:config=config/base/crd/bases \
-          output:rbac:artifacts:config=config/components/controller_rbac \
-          output:webhook:artifacts:config=config/base/webhook
+          output:crd:artifacts:config="$out"
+        # One file per API group, as Fleet lays out its CRDs.
+        for f in "$out"/netbox.miloapis.com_*.yaml; do
+          sed '/^---$/d' "$f" | { echo '---'; cat; }
+        done > config/base/crd/netbox.miloapis.com.yaml
         echo "Manifests generated!"
     deps:
       - install-tools
     silent: true
 
   build:
-    desc: Build the controller-template binary
+    desc: Build the netbox-provider binary
     cmds:
       - |
         set -e
-        echo "Building controller-template..."
+        echo "Building netbox-provider..."
         mkdir -p {{.TOOL_DIR}}
 
         GIT_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
@@ -80,15 +84,35 @@ tasks:
                     -X 'main.gitCommit=${GIT_COMMIT}' \
                     -X 'main.gitTreeState=${GIT_TREE_STATE}' \
                     -X 'main.buildDate=${BUILD_DATE}'" \
-          -o {{.TOOL_DIR}}/controller-template ./cmd/controller-template
-        echo "Binary built: {{.TOOL_DIR}}/controller-template"
+          -o {{.TOOL_DIR}}/netbox-provider ./cmd/netbox-provider
+        echo "Binary built: {{.TOOL_DIR}}/netbox-provider"
     silent: true
 
   test:
-    desc: Run Go tests
+    desc: Run Go tests, including envtest suites (needs setup-envtest)
     cmds:
-      - go test -timeout 5m ./... -count=1
+      - |
+        set -e
+        KUBEBUILDER_ASSETS="$(setup-envtest use {{.ENVTEST_K8S_VERSION}} -p path)"
+        export KUBEBUILDER_ASSETS
+        go test -timeout 10m ./... -count=1
     silent: false
+
+  manifests:validate:
+    desc: Render every kustomize entry point (the published roots and the standalone test root)
+    cmds:
+      - kustomize build config/base/crd >/dev/null
+      - kustomize build config/overlays/management-plane >/dev/null
+      - kustomize build config/standalone >/dev/null
+      - kustomize build test/fleet/crds >/dev/null
+
+  validate:
+    desc: Offline checks - gofmt, go vet, kustomize render, doc links and whitespace
+    cmds:
+      - test -z "$(gofmt -l ./api ./cmd ./internal ./test)"
+      - go vet ./...
+      - task: manifests:validate
+      - bash hack/validate-doc-links.sh
 
   lint:
     desc: Run golangci-lint
@@ -145,14 +169,12 @@ tasks:
       - test -f {{.TOOL_DIR}}/chainsaw-{{.CHAINSAW_VERSION}}
 
   # Development tasks
-  dev:build:
-    desc: Build the controller-template container image for development
+  standalone:build:
+    desc: Build the manager image for the standalone root ({{.IMAGE_NAME}}:{{.IMAGE_TAG}})
     silent: true
     cmds:
       - |
         set -e
-        echo "Building controller-template container image: {{.IMAGE_NAME}}:{{.IMAGE_TAG}}"
-
         GIT_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
         VERSION="v0.0.0-dev+${GIT_COMMIT:0:7}"
         GIT_TREE_STATE="clean"
@@ -160,82 +182,50 @@ tasks:
           GIT_TREE_STATE="dirty"
         fi
         BUILD_DATE=$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo "unknown")
-
-        docker build \
+        docker build -f build/manager.Dockerfile \
           --build-arg VERSION="${VERSION}" \
           --build-arg GIT_COMMIT="${GIT_COMMIT}" \
           --build-arg GIT_TREE_STATE="${GIT_TREE_STATE}" \
           --build-arg BUILD_DATE="${BUILD_DATE}" \
           -t "{{.IMAGE_NAME}}:{{.IMAGE_TAG}}" .
-        echo "Successfully built {{.IMAGE_NAME}}:{{.IMAGE_TAG}}"
 
-  dev:load:
-    desc: Load the controller-template container image into the kind cluster
+  standalone:load:
+    desc: Load the standalone image into the kind cluster
     silent: true
     cmds:
-      - |
-        set -e
-        echo "Loading image {{.IMAGE_NAME}}:{{.IMAGE_TAG}} into kind cluster '{{.TEST_INFRA_CLUSTER_NAME}}'..."
-        kind load docker-image "{{.IMAGE_NAME}}:{{.IMAGE_TAG}}" --name "{{.TEST_INFRA_CLUSTER_NAME}}"
-        echo "Successfully loaded image into kind cluster"
+      - kind load docker-image "{{.IMAGE_NAME}}:{{.IMAGE_TAG}}" --name "{{.TEST_INFRA_CLUSTER_NAME}}"
 
-  dev:setup:
-    desc: Setup lightweight dev environment
+  standalone:setup:
+    desc: Create a disposable kind cluster and deploy the synthetic standalone root
     silent: true
     cmds:
       - task: test-infra:cluster-up
-      - task: dev:build
-      - task: dev:load
-      - task: dev:deploy
+      - task: standalone:build
+      - task: standalone:load
+      - task: standalone:deploy
 
-  dev:deploy:
-    desc: Deploy controller-template using dev overlay
+  standalone:deploy:
+    desc: Apply config/standalone (synthetic, same-cluster; never a production root)
     silent: true
     cmds:
       - |
         set -e
-        echo "----------------------------------------------------------------------"
-        echo "Stage 1: Waiting for Cert-Manager"
-        echo "----------------------------------------------------------------------"
-        task test-infra:kubectl -- rollout status -n cert-manager deployment/cert-manager --timeout=120s
-        task test-infra:kubectl -- rollout status -n cert-manager deployment/cert-manager-webhook --timeout=120s
-        until task test-infra:kubectl -- get crd certificates.cert-manager.io issuers.cert-manager.io >/dev/null 2>&1; do
-          echo "  - CRD not found yet, retrying..."
+        task test-infra:kubectl -- apply --server-side -k test/fleet/crds
+        task test-infra:kubectl -- wait --for=condition=established crd/devices.fleet.datumapis.com --timeout=120s
+        until task test-infra:kubectl -- apply --server-side -k config/standalone; do
+          echo "  - Apply failed (CRDs may not be established yet), retrying in 5s..."
           sleep 5
         done
-        task test-infra:kubectl -- wait --for=condition=established crd/certificates.cert-manager.io crd/issuers.cert-manager.io --timeout=120s
+        task test-infra:kubectl -- rollout status -n netbox-provider-system deployment/netbox-provider-manager --timeout=120s
 
-        echo ""
-        echo "----------------------------------------------------------------------"
-        echo "Stage 2: Deploying controller-template (Dev Overlay)"
-        echo "----------------------------------------------------------------------"
-        until task test-infra:kubectl -- apply -k config/overlays/dev; do
-          echo "  - Apply failed (likely webhook propagation), retrying in 5s..."
-          sleep 5
-        done
-
-        echo ""
-        echo "----------------------------------------------------------------------"
-        echo "Stage 3: Verification"
-        echo "----------------------------------------------------------------------"
-        task test-infra:kubectl -- rollout status -n controller-template-system deployment/controller-template-manager --timeout=120s || echo "  - Controller not ready yet"
-
-        echo ""
-        echo "controller-template successfully deployed in dev mode!"
-        echo "----------------------------------------------------------------------"
-
-  dev:redeploy:
-    desc: Quick rebuild and redeploy for dev environment
+  standalone:redeploy:
+    desc: Rebuild the standalone image and restart the manager
     deps:
-      - dev:build
-      - dev:load
+      - standalone:build
+      - standalone:load
     cmds:
-      - |
-        set -e
-        echo "Redeploying controller-template (dev)..."
-        task test-infra:kubectl -- delete pod -n controller-template-system -l app.kubernetes.io/name=controller-template --wait=false || echo "Deployment not found, run 'task dev:deploy' first"
-        task test-infra:kubectl -- rollout status -n controller-template-system deployment/controller-template-manager --timeout=120s || true
-        echo "Redeployment complete!"
+      - task test-infra:kubectl -- rollout restart -n netbox-provider-system deployment/netbox-provider-manager
+      - task test-infra:kubectl -- rollout status -n netbox-provider-system deployment/netbox-provider-manager --timeout=120s
     silent: true
 
   install-go-tool:
@@ -289,46 +279,6 @@ tasks:
           (cd "$_TOOL_DIR" && ln -sf "$_NAME-$_VERSION" "$_NAME")
           echo "Tool $_NAME is now available at $_SYMLINK_PATH (points to $_VERSIONED_TOOL_PATH)"
         fi
-
-  # UI tasks
-  ui:install:
-    desc: Install UI dependencies
-    dir: ui
-    cmds:
-      - pnpm install
-    silent: true
-
-  ui:dev:
-    desc: Start the UI dev server (http://localhost:3000)
-    dir: ui
-    cmds:
-      - pnpm dev
-    silent: false
-
-  ui:build:
-    desc: Build the UI for production
-    dir: ui
-    cmds:
-      - pnpm build
-    silent: true
-
-  ui:type-check:
-    desc: Run TypeScript type-check on the UI
-    dir: ui
-    cmds:
-      - pnpm type-check
-    silent: false
-
-  ui:docker-build:
-    desc: Build the UI container image
-    cmds:
-      - |
-        set -e
-        GIT_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
-        VERSION="v0.0.0-dev+${GIT_COMMIT:0:7}"
-        docker build -t "ghcr.io/milo-os/controller-template-ui:dev" ui/
-        echo "Built ghcr.io/milo-os/controller-template-ui:dev"
-    silent: true
 
   # E2E Testing
   e2e:

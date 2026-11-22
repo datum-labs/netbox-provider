@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    uses: datum-cloud/actions/.github/workflows/ci-basic.yaml@v1.28.0
+    with:
+      skip: test
+      dockerfile: build/manager.Dockerfile
+      run: |
+        go install sigs.k8s.io/controller-runtime/tools/setup-envtest@32759fab31191897ae86091d8831b2d4b890aedd
+        KUBEBUILDER_ASSETS="$("$(go env GOPATH)/bin/setup-envtest" use 1.31.0 -p path)"
+        export KUBEBUILDER_ASSETS
+        go test ./... -timeout 10m
+        go test -race ./... -timeout 10m
+        go vet ./...
+        test -z "$(gofmt -l ./api ./cmd ./internal ./test)"
+        # Render every kustomize entry point with Fleet's pinned kustomize.
+        kustomize="go run sigs.k8s.io/kustomize/kustomize/v5@v5.8.1"
+        for root in config/base/crd config/overlays/management-plane config/standalone test/fleet/crds; do
+          $kustomize build "$root" >/dev/null
+        done
+        bash hack/validate-doc-links.sh
