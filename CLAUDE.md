@@ -32,6 +32,7 @@ netbox-provider/
 ├── build/manager.Dockerfile    # Manager image
 ├── config/                     # Kustomize roots in Fleet's layout; see config/README.md
 ├── docs/architecture/          # Design and how the controller uses Fleet
+├── docs/operations/            # Runbook for conditions that need an operator
 ├── test/fixtures/netbox/       # Synthetic NetBox collections and mapping
 ├── test/fleet/                 # Vendored Fleet CRD and where it came from
 └── hack/                       # Boilerplate and doc checks

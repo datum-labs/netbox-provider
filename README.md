@@ -53,9 +53,10 @@ types) for the devices it imports, device claims, devices with their
 components and catalog references, and cables. Facilities stay
 operator-owned. Circuits and Sites are not imported.
 
-Read the [design](docs/architecture/design.md) for the full rules, and the
+Read the [design](docs/architecture/design.md) for the full rules, the
 [Fleet usage](docs/architecture/fleet-contract.md) for exactly what it writes
-and the Milo permissions it needs.
+and the Milo permissions it needs, and the [runbook](docs/operations/runbook.md)
+for conditions that need an operator.
 
 ## Deploy
 
