@@ -211,6 +211,21 @@ var _ = Describe("NetBoxSource reconcile", func() {
 		Expect(condition(h.source(), ConditionSourceObserved).Status).To(Equal(metav1.ConditionTrue))
 	})
 
+	It("does not retry a rejected token for at least an hour", func() {
+		h := newHarness().withSourceAndToken(netboxv1alpha1.SourceModeCreate)
+		h.server.Fail(netbox.CollectionSites, http.StatusUnauthorized)
+		result, err := h.reconcile()
+		Expect(err).NotTo(HaveOccurred(), "a rejected token is not returned to the rate limiter")
+		Expect(result.RequeueAfter).To(BeNumerically(">=", rejectedCredentialsInterval))
+		Expect(h.server.Requests()).To(Equal(1), "one rejected request per attempt")
+		Expect(h.recorder.Creates()).To(BeEmpty())
+		s := h.source()
+		Expect(condition(s, ConditionConfigurationResolved)).To(SatisfyAll(HaveField("Status", metav1.ConditionFalse), HaveField("Reason", ReasonTokenRejected)))
+		Expect(condition(s, ConditionSourceObserved).Status).To(Equal(metav1.ConditionUnknown))
+		Expect(condition(s, ConditionReady)).To(SatisfyAll(HaveField("Status", metav1.ConditionFalse), HaveField("Reason", ReasonTokenRejected)))
+		Expect(condition(s, ConditionReady).Message).NotTo(ContainSubstring("sensitive"))
+	})
+
 	It("reports Fleet read failures as Unknown and writes nothing", func() {
 		h := newHarness().withSourceAndToken(netboxv1alpha1.SourceModeCreate)
 		// The Fleet API is unavailable while listing.

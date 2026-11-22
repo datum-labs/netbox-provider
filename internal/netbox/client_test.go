@@ -5,6 +5,7 @@ package netbox_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -137,6 +138,10 @@ func TestErrorsNeverReturnPartialRecordsOrBodies(t *testing.T) {
 			records, err := newClient(t, server, server.URL, netbox.Limits{}).List(context.Background(), netbox.CollectionDevices, nil)
 			if err == nil || records != nil || calls.Load() != 2 || strings.Contains(err.Error(), "sensitive") || strings.Contains(err.Error(), "synthetic") {
 				t.Fatalf("records=%v err=%v calls=%d", records, err, calls.Load())
+			}
+			rejected := status == http.StatusUnauthorized || status == http.StatusForbidden
+			if errors.Is(err, netbox.ErrCredentialsRejected) != rejected {
+				t.Fatalf("status %d: credentials rejected = %v, want %v", status, !rejected, rejected)
 			}
 		})
 	}

@@ -104,6 +104,11 @@ never assert an occupied footprint.
 2. **Read NetBox.** One sequential, complete read of sites, locations, racks,
    device types and devices. Any failure discards the whole read and sets
    `SourceObserved=Unknown` and `Ready=Unknown`; nothing is planned or written.
+   A `401` or `403` is different: retrying the same token cannot succeed, and
+   NetBox installations commonly ban addresses after repeated rejections. It
+   sets `ConfigurationResolved=False` and `Ready=False` with reason
+   `TokenRejected` and is retried after the source's interval or one hour,
+   whichever is longer, never through the error backoff.
 3. **Read Fleet.** List Facility, Rack, DeviceClaim and Device in the target
    namespace through an uncached client. Any failure sets `FleetObserved=Unknown`
    and `Ready=Unknown`.
@@ -123,7 +128,8 @@ never assert an occupied footprint.
    describes this import, never the readiness of a Fleet record or of hardware.
 
 Following the template's reconcile-error rules, transient NetBox and Fleet
-failures return an error (retried with backoff), configuration the user must fix
+failures return an error (retried with backoff from 30 seconds up to 30
+minutes), configuration the user must fix
 is a condition plus a poll or watch, and an invalid URL that passed admission is
 a terminal error.
 
@@ -186,6 +192,7 @@ not read. The Fleet importer's handling of them is the reference for later work.
 | No invented identity | A Device without a chassis serial is `Unresolved/IdentityUnavailable`; its claim is still created | `plans the claim but not the Device`, `TestDeviceWithoutSerialIsUnresolved`, admission spec |
 | Claim and device stay together; dependents of blocked records are blocked | Fixed-point propagation in the plan; skipped dependents at apply time | plan and reconcile specs |
 | Never delete on omission | No delete code path; missing sources are reported `RetainedMissingSource` | `never deletes records whose source disappears`, `TestOmittedSourceRecordsAreRetained` |
+| A rejected token is not retried quickly | `401`/`403` is `TokenRejected` with a requeue of at least an hour; status writes do not trigger reconciles | `does not retry a rejected token for at least an hour`, `TestErrorsNeverReturnPartialRecordsOrBodies` |
 | Uncertainty is Unknown | NetBox, Fleet and ambiguous create failures set Unknown conditions | `reports NetBox failures as Unknown`, `reports Fleet read failures as Unknown` |
 | Generated records pass Fleet admission | envtest installs the vendored Fleet CRD and creates every fixture candidate | `admits every candidate the fixture plan creates` |
 
