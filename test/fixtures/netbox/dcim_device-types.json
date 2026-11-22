@@ -2,6 +2,6 @@
   {"id": 500, "model": "Example 1U Server", "slug": "example-1u", "manufacturer": {"id": 50, "name": "Example Vendor", "slug": "example-vendor"}, "u_height": 1.0, "is_full_depth": true},
   {"id": 501, "model": "", "slug": "example-unnamed", "manufacturer": {"id": 50, "name": "Example Vendor"}, "u_height": "2.0", "is_full_depth": false},
   {"id": 502, "model": "Example Virtual", "slug": "example-virtual", "manufacturer": {"id": 51, "name": "Example Hypervisor"}, "u_height": 0, "is_full_depth": false},
-  {"id": 503, "model": "Example 1U Switch", "manufacturer": {"id": 1, "name": "Example Vendor"}, "u_height": 1, "is_full_depth": false},
-  {"id": 504, "model": "Example 0U PDU", "manufacturer": {"id": 1, "name": "Example Vendor"}, "u_height": 0, "is_full_depth": false}
+  {"id": 503, "model": "Example 1U Switch", "manufacturer": {"id": 50, "name": "Example Vendor"}, "u_height": 1, "is_full_depth": false, "slug": "example-1u-switch"},
+  {"id": 504, "model": "Example 0U PDU", "manufacturer": {"id": 50, "name": "Example Vendor"}, "u_height": 0, "is_full_depth": false, "slug": "example-0u-pdu"}
 ]

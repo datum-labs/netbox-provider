@@ -96,6 +96,9 @@ type writeRecorder struct {
 	// beforeApply, when set, runs before each apply reaches the API server,
 	// to simulate another writer acting between plan and apply.
 	beforeApply func(kind, name string)
+	// applyError, when set and returning an error, fails the apply with it
+	// before it reaches the API server.
+	applyError func(kind, name string) error
 }
 
 // Applies returns Kind/name for every apply, in order.
@@ -138,10 +141,15 @@ func recordingFleetClient(rec *writeRecorder) client.Client {
 			}
 			rec.mu.Lock()
 			rec.applies = append(rec.applies, meta.Kind+"/"+meta.Metadata.Name)
-			hook := rec.beforeApply
+			hook, fail := rec.beforeApply, rec.applyError
 			rec.mu.Unlock()
 			if hook != nil {
 				hook(meta.Kind, meta.Metadata.Name)
+			}
+			if fail != nil {
+				if err := fail(meta.Kind, meta.Metadata.Name); err != nil {
+					return err
+				}
 			}
 			return c.Apply(ctx, obj, opts...)
 		},

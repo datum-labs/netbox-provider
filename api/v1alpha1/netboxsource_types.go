@@ -301,6 +301,36 @@ type NetBoxSourceStatus struct {
 	// RecordsTruncated is true when Records omits entries.
 	// +optional
 	RecordsTruncated bool `json:"recordsTruncated,omitempty"`
+
+	// PendingReleases lists records another writer created while this
+	// controller was applying them, whose fields this controller has not yet
+	// released. Each is retried on every Create-mode reconcile, and its target
+	// stays quarantined, never adopted, until the release succeeds. While the
+	// list is full, nothing is written.
+	//
+	// +kubebuilder:validation:MaxItems=100
+	// +listType=atomic
+	// +optional
+	PendingReleases []PendingRelease `json:"pendingReleases,omitempty"`
+}
+
+// PendingRelease is a record whose fields this controller still has to
+// release.
+type PendingRelease struct {
+	// Kind is the Fleet kind.
+	Kind string `json:"kind"`
+	// Namespace is the Fleet namespace.
+	Namespace string `json:"namespace"`
+	// Name is the Fleet record name.
+	Name string `json:"name"`
+	// UID is the record's UID. A record with another UID is a different
+	// record, which this controller never wrote.
+	UID string `json:"uid"`
+	// Since is when the first release failed.
+	Since metav1.Time `json:"since"`
+	// Message is the last release failure.
+	// +optional
+	Message string `json:"message,omitempty"`
 }
 
 // NetBoxSource connects one NetBox instance to one Fleet inventory namespace.

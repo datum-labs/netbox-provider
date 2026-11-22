@@ -62,6 +62,7 @@ const (
 	ReasonApplyUncertain       = "ApplyUncertain"
 	ReasonReviewRequired       = "ReviewRequired"
 	ReasonSuspended            = "Suspended"
+	ReasonReleasePending       = "ReleasePending"
 )
 
 const (
@@ -78,6 +79,9 @@ const (
 	failureMaxDelay  = 30 * time.Minute
 	// maxStatusRecords bounds status.records.
 	maxStatusRecords = 100
+	// maxPendingReleases bounds status.pendingReleases. While it is full,
+	// nothing is created.
+	maxPendingReleases = 100
 )
 
 // NetBoxSourceReconciler reconciles NetBoxSource objects.
@@ -189,12 +193,17 @@ func (r *NetBoxSourceReconciler) Reconcile(ctx context.Context, req reconcile.Re
 	}
 	set(ConditionFleetObserved, metav1.ConditionTrue, ReasonObserved, "listed existing inventory in the target namespace")
 
+	// Retry releases an earlier reconcile left pending before planning, so a
+	// record another writer created is never planned as this controller's.
+	held := r.retryReleases(ctx, &source, source.Spec.Mode == netboxv1alpha1.SourceModeCreate)
+
 	p := plan.Build(plan.Input{
 		System:    source.Spec.SourceID,
 		Namespace: source.Spec.Target.Namespace,
 		Snapshot:  snapshot,
 		Mapping:   mapping.Spec,
 		Existing:  existing,
+		Held:      held,
 	})
 	status.LastObservation = &netboxv1alpha1.ObservationSummary{
 		SnapshotDigest:  snapshot.Digest(),
@@ -220,13 +229,21 @@ func (r *NetBoxSourceReconciler) Reconcile(ctx context.Context, req reconcile.Re
 		if err := r.updateStatus(ctx, &source); err != nil {
 			return ctrl.Result{}, err
 		}
-		created, updated, uncertain = r.apply(ctx, p)
+		created, updated, uncertain = r.apply(ctx, &source, p)
 		if uncertain > 0 {
 			set(ConditionApplied, metav1.ConditionUnknown, ReasonApplyUncertain,
 				fmt.Sprintf("%d writes have an unknown outcome; they are re-observed before any retry", uncertain))
 			requeue = pollInterval
 		} else {
 			set(ConditionApplied, metav1.ConditionTrue, ReasonApplied, fmt.Sprintf("created %d and updated %d records", created, updated))
+		}
+	}
+	releasePending := ""
+	if pending := len(status.PendingReleases); pending > 0 {
+		releasePending = fmt.Sprintf("%d records another writer created still hold fields this controller applied; they stay quarantined until a Create-mode reconcile releases them; see status.pendingReleases", pending)
+		if source.Spec.Mode == netboxv1alpha1.SourceModeCreate && uncertain == 0 {
+			set(ConditionApplied, metav1.ConditionUnknown, ReasonReleasePending, releasePending)
+			requeue = pollInterval
 		}
 	}
 
@@ -236,6 +253,8 @@ func (r *NetBoxSourceReconciler) Reconcile(ctx context.Context, req reconcile.Re
 	switch {
 	case uncertain > 0:
 		set(ConditionReady, metav1.ConditionUnknown, ReasonApplyUncertain, "some writes have an unknown outcome")
+	case releasePending != "":
+		set(ConditionReady, metav1.ConditionUnknown, ReasonReleasePending, releasePending)
 	case blocked > 0:
 		set(ConditionReady, metav1.ConditionFalse, ReasonReviewRequired,
 			fmt.Sprintf("%d quarantined and %d unresolved records need review; see status.records", status.Plan.Quarantined, status.Plan.Unresolved))
@@ -348,7 +367,11 @@ func (r *NetBoxSourceReconciler) observeFleet(ctx context.Context, namespace str
 // conflict, which quarantines the record instead of taking the field. A write
 // that fails ambiguously is counted uncertain; its dependents are skipped
 // until a later reconcile re-observes Fleet.
-func (r *NetBoxSourceReconciler) apply(ctx context.Context, p *plan.Plan) (int, int, int) {
+//
+// A create that lands on a record another writer made is undone by releasing
+// this controller's fields. A release that fails is recorded in
+// status.pendingReleases at once and retried by later reconciles.
+func (r *NetBoxSourceReconciler) apply(ctx context.Context, source *netboxv1alpha1.NetBoxSource, p *plan.Plan) (int, int, int) {
 	logger := log.FromContext(ctx)
 	created, updated, uncertain := 0, 0, 0
 	// blocked maps a target key to true when its write outcome is unknown
@@ -378,6 +401,11 @@ func (r *NetBoxSourceReconciler) apply(ctx context.Context, p *plan.Plan) (int, 
 				continue
 			}
 			creating := c.Action == plan.ActionCreate
+			if creating && len(source.Status.PendingReleases) >= maxPendingReleases {
+				blocked[c.Key()] = false
+				c.Action, c.Reason, c.Message = plan.ActionUnresolved, ReasonReleasePending, "not created while status.pendingReleases is full"
+				continue
+			}
 			obj := c.Object.DeepCopy()
 			if !creating {
 				obj.SetUID(c.ExistingUID)
@@ -394,7 +422,18 @@ func (r *NetBoxSourceReconciler) apply(ctx context.Context, p *plan.Plan) (int, 
 				if releaseErr := r.release(ctx, obj); releaseErr != nil {
 					blocked[c.Key()] = true
 					uncertain++
-					c.Message = "another writer created this record while it was being applied, and releasing this controller's fields failed; review it: " + truncate(apiMessage(releaseErr), 160)
+					c.Message = "another writer created this record while it was being applied, and releasing this controller's fields failed; the release is retried by later reconciles: " + truncate(apiMessage(releaseErr), 160)
+					// Record the release before any further effect: until it
+					// succeeds, the record carries this controller's labels and
+					// fields, and only this entry keeps it from being adopted.
+					source.Status.PendingReleases = append(source.Status.PendingReleases, netboxv1alpha1.PendingRelease{
+						Kind: kind, Namespace: obj.GetNamespace(), Name: obj.GetName(), UID: string(obj.GetUID()),
+						Since: metav1.NewTime(r.now()), Message: truncate(apiMessage(releaseErr), 160),
+					})
+					if err := r.updateStatus(ctx, source); err != nil {
+						logger.Error(err, "recording a pending release failed; no further records are written", "kind", kind, "name", c.Name, "uid", obj.GetUID())
+						return created, updated, uncertain
+					}
 				} else {
 					blocked[c.Key()] = false
 					c.Message = "another writer created this record while it was being applied; this controller's fields were released, and it is not adopted"
@@ -433,6 +472,52 @@ func (r *NetBoxSourceReconciler) apply(ctx context.Context, p *plan.Plan) (int, 
 		}
 	}
 	return created, updated, uncertain
+}
+
+// retryReleases retries each release in status.pendingReleases when write is
+// true, and returns the records the plan must hold this reconcile: every
+// pending entry in the target namespace, including one released now, since
+// the Fleet observation was read before the release. An entry is dropped once
+// its record is released, gone, replaced by a record with another UID, or
+// holds nothing this controller applied. Observe mode writes nothing, so its
+// entries wait for Create mode.
+func (r *NetBoxSourceReconciler) retryReleases(ctx context.Context, source *netboxv1alpha1.NetBoxSource, write bool) map[string]string {
+	logger := log.FromContext(ctx)
+	held := map[string]string{}
+	var pending []netboxv1alpha1.PendingRelease
+	for _, entry := range source.Status.PendingReleases {
+		message := "another writer created this record while it was being applied; this controller's fields were released on a later reconcile, and it is not adopted"
+		obj := &unstructured.Unstructured{}
+		obj.SetGroupVersionKind(fleet.GVK(entry.Kind))
+		err := r.Fleet.Get(ctx, client.ObjectKey{Namespace: entry.Namespace, Name: entry.Name}, obj)
+		keep := false
+		switch {
+		case apierrors.IsNotFound(err) || (err == nil && string(obj.GetUID()) != entry.UID):
+			logger.Info("pending release dropped: the record is gone or replaced", "kind", entry.Kind, "name", entry.Name)
+			message = "the record this controller had yet to release was deleted or replaced; it is re-observed before anything is written"
+		case err != nil:
+			keep, entry.Message = true, "reading the record failed: "+truncate(apiMessage(err), 160)
+		case !plan.AppliedBy(obj, plan.FieldManager):
+			logger.Info("pending release dropped: this controller owns nothing on the record", "kind", entry.Kind, "name", entry.Name)
+		case !write:
+			keep = true
+		default:
+			if err := r.release(ctx, obj); err != nil {
+				keep, entry.Message = true, truncate(apiMessage(err), 160)
+			} else {
+				logger.Info("released this controller's fields on a record another writer created", "kind", entry.Kind, "name", entry.Name)
+			}
+		}
+		if keep {
+			pending = append(pending, entry)
+			message = "another writer created this record while it was being applied, and this controller's fields on it are not yet released; it is not adopted, and the release is retried on every Create-mode reconcile: " + entry.Message
+		}
+		if entry.Namespace == source.Spec.Target.Namespace {
+			held[entry.Kind+"/"+entry.Name] = message
+		}
+	}
+	source.Status.PendingReleases = pending
+	return held
 }
 
 // release applies an empty configuration as plan.FieldManager to the record

@@ -8,8 +8,8 @@ the owner of the schema.
 | Field | Value |
 | --- | --- |
 | Source repository | `datum-cloud/fleet` |
-| Source | datum-cloud/fleet#110 (merged), adding the unidentified-device marker on top of the #106 schema |
-| Branch head when vendored | `f87c86b3f8f6af2a2f839ed61ece82de32a8b88a` (`feat/manual-inventory-records`, the #110 merge) |
+| Source | `feat/manual-inventory-records` with datum-cloud/fleet#106, #107 (hardware catalog), #110 (unidentified-device marker) and #134 (importer role) |
+| Branch head when vendored | `8a7cd0533f05b7288eab339c6233dd824e83784b` (`feat/manual-inventory-records`) |
 | Last commit touching the file | `5341785b90777d3c64eae1345ea94fedda1e35c8` |
 | sha256 | `023ae431bfd9ff566fa511a64b7bdc247c1bd0a0d4ae912e014a07bf21848f45` |
 

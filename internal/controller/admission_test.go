@@ -44,7 +44,7 @@ var _ = Describe("Fleet admission of generated records", func() {
 	It("admits every candidate with no provenance, and rejects re-creation", func() {
 		h := newHarness()
 		p := fixturePlan(h)
-		Expect(p.Count(plan.ActionCreate)).To(Equal(15))
+		Expect(p.Count(plan.ActionCreate)).To(Equal(19))
 		kinds := map[string]bool{}
 		for _, kind := range fleet.WriteKinds {
 			for _, c := range p.Candidates {
@@ -66,7 +66,7 @@ var _ = Describe("Fleet admission of generated records", func() {
 			Expect(stored.GetLabels()).To(HaveKeyWithValue(plan.LabelSource, testSystem))
 			Expect(ownedFields(stored, plan.FieldManager)).To(Equal(appliedFields(c.Object)), c.Key()+": netbox-provider owns exactly the applied fields")
 		}
-		Expect(kinds).To(Equal(map[string]bool{fleet.KindRack: true, fleet.KindPowerFeed: true, fleet.KindDeviceClaim: true, fleet.KindDevice: true, fleet.KindCable: true}))
+		Expect(kinds).To(Equal(map[string]bool{fleet.KindRack: true, fleet.KindPowerFeed: true, fleet.KindManufacturer: true, fleet.KindDeviceType: true, fleet.KindDeviceClaim: true, fleet.KindDevice: true, fleet.KindCable: true}))
 		withBMC := 0
 		for _, c := range p.Candidates {
 			if c.Kind == fleet.KindDevice {
