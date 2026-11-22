@@ -11,8 +11,11 @@ holds the template's controller conventions.
   `docs/architecture/fleet-contract.md`). Write only physical facts in Fleet
   specs; no authorship or source fields. Correlate only through this
   controller's `netbox.miloapis.com/*` labels and annotations. `internal/fleet` stays source-agnostic. Do not edit Fleet from here.
-- Never invent identity. A Device needs a reviewed chassis serial; otherwise
-  only its DeviceClaim is created and the Device is reported Unresolved.
+- Never invent identity. A Device carries a reviewed chassis serial, or Fleet's
+  explicit unidentified marker with a fixed reason when the source has no
+  reviewed serial. Never write a serial or system UUID that was not reviewed,
+  never mark a Device that has one, and never write `bmc` on a marked Device.
+  A provider host ID is not missing identity: that Device is deferred.
 - A record without this controller's labels was not written by it: never adopt
   it, and quarantine it if it conflicts.
 - Do not import Fleet's `internal` packages or invent a Fleet module path. Use

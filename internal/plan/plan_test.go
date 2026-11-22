@@ -162,6 +162,7 @@ func TestFixturePlan(t *testing.T) {
 		"Device dcim/devices/1000":        {plan.ActionCreate, plan.ReasonNew},
 		"DeviceClaim dcim/devices/1001":   {plan.ActionCreate, plan.ReasonNew},
 		"DeviceClaim dcim/devices/1002":   {plan.ActionCreate, plan.ReasonNew},
+		"Device dcim/devices/1002":        {plan.ActionCreate, plan.ReasonNew},
 		"DeviceClaim dcim/devices/1007":   {plan.ActionCreate, plan.ReasonNew},
 		"Device dcim/devices/1007":        {plan.ActionCreate, plan.ReasonNew},
 		"DeviceClaim dcim/devices/1008":   {plan.ActionCreate, plan.ReasonNew},
@@ -169,8 +170,8 @@ func TestFixturePlan(t *testing.T) {
 		"Cable dcim/cables/5000":          {plan.ActionCreate, plan.ReasonNew},
 		"Cable dcim/cables/5001":          {plan.ActionCreate, plan.ReasonNew},
 		"Cable dcim/cables/5002":          {plan.ActionCreate, plan.ReasonNew},
+		"Cable dcim/cables/5008":          {plan.ActionCreate, plan.ReasonNew},
 		"record dcim/devices/1001":        {"Unresolved", plan.ReasonIdentityUnavailable},
-		"record dcim/devices/1002":        {"Unresolved", plan.ReasonIdentityUnavailable},
 		"record dcim/racks/101":           {"Unresolved", plan.ReasonPremisesUnmapped},
 		"record dcim/devices/1003":        {"Excluded", plan.ReasonExcludedByRole},
 		"record dcim/devices/1004":        {"Unresolved", plan.ReasonDeviceUnmapped},
@@ -287,7 +288,7 @@ func TestNamesAndLabelsAreStable(t *testing.T) {
 	}
 }
 
-func TestDeviceWithoutSerialIsUnresolved(t *testing.T) {
+func TestDeviceWithoutSerialIsRecordedAsUnidentified(t *testing.T) {
 	in := input(t)
 	for i := range in.Snapshot.Devices {
 		if in.Snapshot.Devices[i].ID == 1000 {
@@ -295,14 +296,25 @@ func TestDeviceWithoutSerialIsUnresolved(t *testing.T) {
 		}
 	}
 	p := plan.Build(in)
-	if hasCandidate(p, fleet.KindDevice, "dcim/devices/1000") {
-		t.Fatal("planned a Device with no serial or system UUID")
+	device := candidate(t, p, fleet.KindDevice, "dcim/devices/1000")
+	claim := candidate(t, p, fleet.KindDeviceClaim, "dcim/devices/1000")
+	want := map[string]any{"manufacturer": "Example Vendor", "model": "Example 1U Server", "unidentified": true, "unidentifiedReason": plan.UnidentifiedNoSerial}
+	if device.Action != plan.ActionCreate || !equalJSON(field(t, device, "identity"), want) {
+		t.Fatalf("%s %v", device.Action, field(t, device, "identity"))
 	}
-	if got := outcomes(p)["record dcim/devices/1000"]; got.reason != plan.ReasonIdentityUnavailable || got.action != "Unresolved" {
-		t.Fatalf("outcome %+v", got)
+	if field(t, claim, "expectedIdentity", "serial") != nil || field(t, device, "claimRef", "name") != claim.Name {
+		t.Fatal("an unidentified Device binds only to a claim that expects no serial")
 	}
-	if candidate(t, p, fleet.KindDeviceClaim, "dcim/devices/1000").Action != plan.ActionCreate {
-		t.Fatal("the installation plan should still be recorded")
+
+	// An unreviewed serial is dropped, never written beside the marker.
+	unknown := candidate(t, p, fleet.KindDevice, "dcim/devices/1002")
+	if field(t, unknown, "identity", "serial") != nil || field(t, unknown, "identity", "unidentifiedReason") != plan.UnidentifiedSerialUnreviewed {
+		t.Fatalf("unknown-serial identity %v", field(t, unknown, "identity"))
+	}
+
+	// A provider host ID is a provider's record, not missing identity.
+	if hasCandidate(p, fleet.KindDevice, "dcim/devices/1001") || outcomes(p)["record dcim/devices/1001"].reason != plan.ReasonIdentityUnavailable {
+		t.Fatal("a provider-hosted server was recorded as unidentified hardware")
 	}
 }
 

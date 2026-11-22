@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -25,7 +26,7 @@ import (
 
 // vendoredFleetCRDDigest is recorded in test/fleet/README.md with its source
 // commit. Re-vendoring must update both.
-const vendoredFleetCRDDigest = "21c081b63e8efb37d71d19a66616a972413b836ace24427de5d2b947f5ebbe9e"
+const vendoredFleetCRDDigest = "023ae431bfd9ff566fa511a64b7bdc247c1bd0a0d4ae912e014a07bf21848f45"
 
 var _ = Describe("Fleet admission of generated records", func() {
 	It("uses the recorded vendored Fleet CRD", func() {
@@ -41,7 +42,7 @@ var _ = Describe("Fleet admission of generated records", func() {
 	It("admits every candidate with no provenance, and rejects re-creation", func() {
 		h := newHarness()
 		p := fixturePlan(h)
-		Expect(p.Count(plan.ActionCreate)).To(Equal(13))
+		Expect(p.Count(plan.ActionCreate)).To(Equal(15))
 		kinds := map[string]bool{}
 		for _, kind := range fleet.WriteKinds {
 			for _, c := range p.Candidates {
@@ -98,21 +99,53 @@ var _ = Describe("Fleet admission of generated records", func() {
 		Fail("no rack candidate")
 	})
 
-	It("rejects a Device without serial or system UUID, which is why the plan leaves it Unresolved", func() {
+	It("admits the unidentified marker only without serial, system UUID or BMC", func() {
 		h := newHarness()
 		p := fixturePlan(h)
+		var marked, identified *unstructured.Unstructured
 		for _, c := range p.Candidates {
-			if c.Kind == fleet.KindDevice {
-				device := c.Object.DeepCopy()
-				device.SetName("netbox-identity-probe")
-				unstructured.RemoveNestedField(device.Object, "spec", "identity", "serial")
-				err := k8sClient.Create(ctx, device)
-				Expect(apierrors.IsInvalid(err)).To(BeTrue(), "%v", err)
-				Expect(err.Error()).To(ContainSubstring("a device needs a serial or system UUID"))
-				return
+			if c.Kind != fleet.KindDevice {
+				continue
+			}
+			if v, _, _ := unstructured.NestedBool(c.Object.Object, "spec", "identity", "unidentified"); v {
+				marked = c.Object
+			} else if identified == nil {
+				identified = c.Object
 			}
 		}
-		Fail("no device candidate")
+		Expect(marked).NotTo(BeNil(), "the fixture plans an unidentified Device")
+		Expect(identified).NotTo(BeNil())
+		probe := func(base *unstructured.Unstructured, name string, mutate func(*unstructured.Unstructured)) error {
+			device := base.DeepCopy()
+			device.SetName(name)
+			mutate(device)
+			return k8sClient.Create(ctx, device)
+		}
+		for name, tc := range map[string]struct {
+			base    *unstructured.Unstructured
+			mutate  func(*unstructured.Unstructured)
+			message string
+		}{
+			"neither identity nor marker": {identified, func(d *unstructured.Unstructured) {
+				unstructured.RemoveNestedField(d.Object, "spec", "identity", "serial")
+			}, "a device needs a serial or system UUID, or unidentified set to true with a reason"},
+			"marker with a serial": {marked, func(d *unstructured.Unstructured) {
+				_ = unstructured.SetNestedField(d.Object, "SYNTH-PROBE-0001", "spec", "identity", "serial")
+			}, "an unidentified device cannot carry a serial or system UUID"},
+			"marker without a reason": {marked, func(d *unstructured.Unstructured) {
+				unstructured.RemoveNestedField(d.Object, "spec", "identity", "unidentifiedReason")
+			}, "unidentified and unidentifiedReason must be set together"},
+			"marker false": {marked, func(d *unstructured.Unstructured) {
+				_ = unstructured.SetNestedField(d.Object, false, "spec", "identity", "unidentified")
+			}, "unidentified may only be true"},
+			"marker with a BMC": {marked, func(d *unstructured.Unstructured) {
+				_ = unstructured.SetNestedField(d.Object, "https://bmc.example.invalid", "spec", "bmc", "endpoint")
+			}, "a device without hardware identity cannot record a BMC endpoint"},
+		} {
+			err := probe(tc.base, "netbox-probe-"+strings.ReplaceAll(name, " ", "-"), tc.mutate)
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "%s: %v", name, err)
+			Expect(err.Error()).To(ContainSubstring(tc.message), name)
+		}
 	})
 })
 

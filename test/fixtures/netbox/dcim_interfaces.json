@@ -7,5 +7,7 @@
   {"id": 2010, "device": {"id": 1007}, "name": "swp1", "type": {"value": "25gbase-x-sfp28"}},
   {"id": 2011, "device": {"id": 1007}, "name": "swp2", "type": {"value": "25gbase-x-sfp28"}},
   {"id": 2012, "device": {"id": 1007}, "name": "swp3", "type": {"value": "25gbase-x-sfp28"}},
-  {"id": 2013, "device": {"id": 1007}, "name": "mgmt0", "type": {"value": "1000base-t"}}
+  {"id": 2013, "device": {"id": 1007}, "name": "mgmt0", "type": {"value": "1000base-t"}},
+  {"id": 2014, "device": {"id": 1007}, "name": "swp4", "type": {"value": "1000base-t"}},
+  {"id": 2020, "device": {"id": 1002}, "name": "eth0", "type": {"value": "1000base-t"}}
 ]

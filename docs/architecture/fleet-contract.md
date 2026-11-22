@@ -17,6 +17,7 @@ The schema is Fleet's target inventory schema from
 | [datum-cloud/fleet#105](https://github.com/datum-cloud/fleet/pull/105) | Merged | Makes record-authorship metadata optional, so records without it are admitted. |
 | [datum-cloud/fleet#106](https://github.com/datum-cloud/fleet/pull/106) | Merged | The target schema: removes record-authorship metadata, component source references and Fleet's NetBox import support. A Device's identity needs a serial or system UUID. |
 | [datum-cloud/fleet#101](https://github.com/datum-cloud/fleet/pull/101) | Merged | The create-only importer role below. |
+| [datum-cloud/fleet#110](https://github.com/datum-cloud/fleet/pull/110) | Open | `identity.unidentified` and `identity.unidentifiedReason`: a Device with no recorded hardware identity. A Fleet deployment without it rejects such Devices, so they are quarantined and their cables blocked. |
 
 A Fleet deployment older than #105 requires authorship metadata that this
 controller does not send, so its creates are rejected. That is a definite
@@ -31,12 +32,17 @@ mappings, and Cables, with only the physical facts in the
 `reportedPlacement`, `MachineCapacity` or `deviceRef`, and never updates,
 patches or deletes a record.
 
-A Device is created only when the mapping says the NetBox serial is a chassis
-serial and NetBox has one, because Fleet requires a serial or system UUID.
-Otherwise the DeviceClaim, which needs no identity, is still created and the
-Device is reported Unresolved. This follows Fleet's guidance to keep the plan
-and defer registration when identity is unknown. envtest proves the vendored
-CRD rejects such a Device.
+Fleet requires a Device to have a serial or system UUID, or to say explicitly
+that it has no recorded hardware identity. The controller writes the serial
+only when the mapping says it is a chassis serial and NetBox has one.
+Otherwise it writes `identity.unidentified: true` with one of two fixed reasons
+(no serial in the source, or a serial not reviewed as a chassis serial), never
+a host name, and never a serial, system UUID or BMC beside it. Its claim
+expects no serial. A marked Device can be cabled but never enrolled as
+capacity. A serial reviewed as a provider host ID is the provider's record,
+not missing identity, so that Device is deferred and only its claim is
+created. envtest proves the vendored CRD admits the marker and rejects it with
+a serial, without a reason, set false, or with a BMC.
 
 ## Correlation is this controller's metadata
 
