@@ -123,6 +123,10 @@ type Input struct {
 	Snapshot  *netbox.Snapshot
 	Mapping   netboxv1alpha1.NetBoxMappingSpec
 	Existing  Existing
+	// Held maps Kind/name to why the existing record must not be written or
+	// adopted, such as a release this controller has yet to complete. A held
+	// candidate is Quarantined/NameConflict with that message.
+	Held map[string]string
 }
 
 // Plan is the result of Build.
@@ -546,7 +550,9 @@ func (b *builder) reconcile(include func(*Candidate) bool) {
 		}
 		ref, _ := KeyOf(c.Object)
 		current, ok := existing[c.Key()]
-		switch {
+		switch held, isHeld := b.in.Held[c.Key()]; {
+		case isHeld:
+			c.Action, c.Reason, c.Message = ActionQuarantined, ReasonNameConflict, held
 		case ok && current.GetDeletionTimestamp() != nil:
 			c.Action, c.Reason, c.Message = ActionQuarantined, ReasonExistingDeleting, "a record with this name is being deleted; nothing is written"
 		case ok:

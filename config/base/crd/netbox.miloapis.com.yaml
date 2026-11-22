@@ -579,6 +579,49 @@ spec:
                 description: ObservedGeneration is the most recent generation observed.
                 format: int64
                 type: integer
+              pendingReleases:
+                description: |-
+                  PendingReleases lists records another writer created while this
+                  controller was applying them, whose fields this controller has not yet
+                  released. Each is retried on every Create-mode reconcile, and its target
+                  stays quarantined, never adopted, until the release succeeds. While the
+                  list is full, nothing is written.
+                items:
+                  description: |-
+                    PendingRelease is a record whose fields this controller still has to
+                    release.
+                  properties:
+                    kind:
+                      description: Kind is the Fleet kind.
+                      type: string
+                    message:
+                      description: Message is the last release failure.
+                      type: string
+                    name:
+                      description: Name is the Fleet record name.
+                      type: string
+                    namespace:
+                      description: Namespace is the Fleet namespace.
+                      type: string
+                    since:
+                      description: Since is when the first release failed.
+                      format: date-time
+                      type: string
+                    uid:
+                      description: |-
+                        UID is the record's UID. A record with another UID is a different
+                        record, which this controller never wrote.
+                      type: string
+                  required:
+                  - kind
+                  - name
+                  - namespace
+                  - since
+                  - uid
+                  type: object
+                maxItems: 100
+                type: array
+                x-kubernetes-list-type: atomic
               plan:
                 description: Plan counts outcomes of the last complete plan.
                 properties:
