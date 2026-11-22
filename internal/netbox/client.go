@@ -69,6 +69,11 @@ type Client struct {
 // ErrInvalidConfig marks a configuration no retry can fix.
 var ErrInvalidConfig = errors.New("invalid NetBox client configuration")
 
+// ErrCredentialsRejected marks a 401 or 403 from NetBox. Retrying with the
+// same token cannot succeed, and NetBox installations commonly ban client
+// addresses after repeated rejections.
+var ErrCredentialsRejected = errors.New("NetBox rejected the credentials")
+
 // Root validates and normalizes an installation root URL.
 func Root(base string) (*url.URL, error) {
 	parsed, err := url.Parse(base)
@@ -296,6 +301,9 @@ func (c *Client) fetch(ctx context.Context, target *url.URL, remaining *int64) (
 		return page{}, errors.New("request failed")
 	}
 	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
+		return page{}, fmt.Errorf("%w: HTTP %d", ErrCredentialsRejected, response.StatusCode)
+	}
 	if response.StatusCode != http.StatusOK {
 		return page{}, fmt.Errorf("HTTP %d", response.StatusCode)
 	}

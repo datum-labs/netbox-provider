@@ -17,10 +17,14 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	netboxv1alpha1 "go.miloapis.com/netbox-provider/api/v1alpha1"
@@ -46,6 +50,7 @@ const (
 	ReasonSecretNotFound       = "SecretNotFound"
 	ReasonSecretKeyMissing     = "SecretKeyMissing"
 	ReasonTokenInvalid         = "TokenInvalid"
+	ReasonTokenRejected        = "TokenRejected"
 	ReasonInvalidConfiguration = "InvalidConfiguration"
 	ReasonObserved             = "Observed"
 	ReasonReadFailed           = "ReadFailed"
@@ -66,6 +71,12 @@ const (
 	pollInterval = time.Minute
 	// defaultInterval matches the CRD default for spec.interval.
 	defaultInterval = 30 * time.Minute
+	// rejectedCredentialsInterval is the shortest wait before retrying a token
+	// NetBox rejected, so a bad token cannot trip address bans.
+	rejectedCredentialsInterval = time.Hour
+	// failureBaseDelay and failureMaxDelay bound retries of other failures.
+	failureBaseDelay = 30 * time.Second
+	failureMaxDelay  = 30 * time.Minute
 	// maxStatusRecords bounds status.records.
 	maxStatusRecords = 100
 )
@@ -146,6 +157,15 @@ func (r *NetBoxSourceReconciler) Reconcile(ctx context.Context, req reconcile.Re
 	readCtx, cancel := context.WithTimeout(ctx, readTimeout)
 	snapshot, err := reader.Snapshot(readCtx, netbox.Scope{SiteIDs: source.Spec.Scope.SiteIDs}, r.now())
 	cancel()
+	if errors.Is(err, netbox.ErrCredentialsRejected) {
+		retry := max(rejectedCredentialsInterval, interval(source))
+		message := fmt.Sprintf("NetBox rejected the token; it is not retried for %s: %v", retry, err)
+		set(ConditionConfigurationResolved, metav1.ConditionFalse, ReasonTokenRejected, message)
+		set(ConditionSourceObserved, metav1.ConditionUnknown, ReasonReadFailed, "no complete NetBox observation")
+		set(ConditionApplied, metav1.ConditionUnknown, ReasonNotAttempted, "no complete NetBox observation")
+		set(ConditionReady, metav1.ConditionFalse, ReasonTokenRejected, message)
+		return ctrl.Result{RequeueAfter: retry}, r.updateStatus(ctx, &source)
+	}
 	if err != nil {
 		message := "NetBox read failed; source state is unknown: " + err.Error()
 		set(ConditionSourceObserved, metav1.ConditionUnknown, ReasonReadFailed, message)
@@ -187,10 +207,7 @@ func (r *NetBoxSourceReconciler) Reconcile(ctx context.Context, req reconcile.Re
 	}
 
 	created, uncertain := 0, 0
-	requeue := defaultInterval
-	if source.Spec.Interval != nil {
-		requeue = source.Spec.Interval.Duration
-	}
+	requeue := interval(source)
 	creates := p.Count(plan.ActionCreate)
 	switch {
 	case source.Spec.Mode != netboxv1alpha1.SourceModeCreate:
@@ -230,6 +247,14 @@ func (r *NetBoxSourceReconciler) Reconcile(ctx context.Context, req reconcile.Re
 	logger.Info("reconciled NetBox source", "mode", source.Spec.Mode, "snapshot", status.LastObservation.SnapshotDigest,
 		"create", status.Plan.Create, "created", created, "uncertain", uncertain, "quarantined", status.Plan.Quarantined)
 	return ctrl.Result{RequeueAfter: requeue}, r.updateStatus(ctx, &source)
+}
+
+// interval is the source's re-read period.
+func interval(source netboxv1alpha1.NetBoxSource) time.Duration {
+	if source.Spec.Interval != nil {
+		return source.Spec.Interval.Duration
+	}
+	return defaultInterval
 }
 
 func (r *NetBoxSourceReconciler) now() time.Time {
@@ -460,8 +485,13 @@ func (r *NetBoxSourceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		Named("netboxsource").
-		For(&netboxv1alpha1.NetBoxSource{}).
+		// Status writes do not trigger reads; only spec changes, mappings and
+		// requeues do.
+		For(&netboxv1alpha1.NetBoxSource{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Watches(&netboxv1alpha1.NetBoxMapping{}, handler.EnqueueRequestsFromMapFunc(r.sourcesForMapping)).
+		WithOptions(controller.Options{
+			RateLimiter: workqueue.NewTypedItemExponentialFailureRateLimiter[reconcile.Request](failureBaseDelay, failureMaxDelay),
+		}).
 		Complete(r)
 }
 
