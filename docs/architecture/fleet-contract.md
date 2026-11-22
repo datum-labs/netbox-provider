@@ -17,7 +17,7 @@ The schema is Fleet's target inventory schema from
 | [datum-cloud/fleet#105](https://github.com/datum-cloud/fleet/pull/105) | Merged | Makes record-authorship metadata optional, so records without it are admitted. |
 | [datum-cloud/fleet#106](https://github.com/datum-cloud/fleet/pull/106) | Merged | The target schema: removes record-authorship metadata, component source references and Fleet's NetBox import support. A Device's identity needs a serial or system UUID. |
 | [datum-cloud/fleet#101](https://github.com/datum-cloud/fleet/pull/101) | Merged | The create-only importer role below. |
-| [datum-cloud/fleet#110](https://github.com/datum-cloud/fleet/pull/110) | Open | `identity.unidentified` and `identity.unidentifiedReason`: a Device with no recorded hardware identity. A Fleet deployment without it rejects such Devices, so they are quarantined and their cables blocked. |
+| [datum-cloud/fleet#110](https://github.com/datum-cloud/fleet/pull/110) | Merged | `identity.unidentified` and `identity.unidentifiedReason`: a Device with no recorded hardware identity. A Fleet deployment without it rejects such Devices, so they are quarantined and their cables blocked. |
 
 A Fleet deployment older than #105 requires authorship metadata that this
 controller does not send, so its creates are rejected. That is a definite
