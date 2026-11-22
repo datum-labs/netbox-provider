@@ -43,7 +43,11 @@ var Collections = []string{
 	"dcim/sites", "dcim/locations", "dcim/racks", "dcim/device-types", "dcim/devices",
 	"dcim/interfaces", "dcim/power-ports", "dcim/power-outlets", "dcim/console-ports", "dcim/console-server-ports",
 	"dcim/front-ports", "dcim/rear-ports", "dcim/modules", "dcim/inventory-items", "dcim/device-bays",
-	"dcim/power-panels", "dcim/power-feeds", "dcim/cables", "ipam/ip-addresses",
+	"dcim/power-panels", "dcim/power-feeds", "dcim/cables", "ipam/ip-addresses", "dcim/manufacturers",
+	"dcim/interface-templates", "dcim/power-port-templates", "dcim/power-outlet-templates",
+	"dcim/console-port-templates", "dcim/console-server-port-templates", "dcim/front-port-templates",
+	"dcim/rear-port-templates", "dcim/module-bay-templates", "dcim/device-bay-templates",
+	"dcim/inventory-item-templates",
 }
 
 // siteFiltered are the collections whose records carry a site, which the
@@ -167,11 +171,14 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 
 func filter(records []map[string]any, collection string, query url.Values) []map[string]any {
 	key, field := "site_id", "site"
-	if collection == "dcim/sites" || collection == "ipam/ip-addresses" {
+	switch {
+	case collection == "dcim/sites" || collection == "ipam/ip-addresses" || collection == "dcim/manufacturers":
 		key, field = "id", ""
+	case strings.HasSuffix(collection, "-templates"):
+		key, field = "device_type_id", "device_type"
 	}
 	wanted := query[key]
-	if len(wanted) == 0 || (field != "" && !siteFiltered[collection]) {
+	if len(wanted) == 0 || (field != "" && !siteFiltered[collection] && key != "device_type_id") {
 		return records
 	}
 	out := []map[string]any{}

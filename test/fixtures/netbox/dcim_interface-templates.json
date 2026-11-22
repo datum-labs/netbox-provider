@@ -1,0 +1,5 @@
+[
+  {"id": 700, "device_type": {"id": 500}, "name": "eth0", "type": {"value": "1000base-t", "label": "1000BASE-T"}},
+  {"id": 701, "device_type": {"id": 500}, "name": "eth1", "type": {"value": "25gbase-x-sfp28"}},
+  {"id": 702, "device_type": {"id": 500}, "name": "bond0", "type": {"value": "lag"}}
+]

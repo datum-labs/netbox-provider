@@ -27,7 +27,7 @@ var _ = Describe("server-side apply field ownership", func() {
 		h := newHarness().withSourceAndToken(netboxv1alpha1.SourceModeCreate)
 		_, err := h.reconcile()
 		Expect(err).NotTo(HaveOccurred())
-		Expect(h.recorder.Applies()).To(HaveLen(15))
+		Expect(h.recorder.Applies()).To(HaveLen(19))
 		return h
 	}
 	device := func(h *harness) *unstructured.Unstructured {
@@ -75,8 +75,8 @@ var _ = Describe("server-side apply field ownership", func() {
 
 		h.server.Set(netbox.CollectionDevices, 1000, "asset_tag", "SYNTH-ASSET-0009")
 		later(h, time.Hour)
-		Expect(h.recorder.Applies()).To(HaveLen(16), "only the changed Device is applied again")
-		Expect(h.recorder.Applies()[15]).To(Equal(fleet.KindDevice + "/" + deviceName))
+		Expect(h.recorder.Applies()).To(HaveLen(20), "only the changed Device is applied again")
+		Expect(h.recorder.Applies()[19]).To(Equal(fleet.KindDevice + "/" + deviceName))
 		s := h.source()
 		Expect(recordFor(s, "dcim/devices/1000", "Device").State).To(Equal(netboxv1alpha1.RecordStateUpdated))
 		Expect(s.Status.Plan.Updated).To(Equal(int32(1)))
@@ -90,8 +90,8 @@ var _ = Describe("server-side apply field ownership", func() {
 
 		// A second reconcile is a no-op.
 		later(h, 2*time.Hour)
-		Expect(h.recorder.Applies()).To(HaveLen(16))
-		Expect(h.source().Status.Plan.Unchanged).To(Equal(int32(15)))
+		Expect(h.recorder.Applies()).To(HaveLen(20))
+		Expect(h.source().Status.Plan.Unchanged).To(Equal(int32(19)))
 	})
 
 	It("quarantines a conflict with another manager instead of forcing ownership", func() {
@@ -99,7 +99,7 @@ var _ = Describe("server-side apply field ownership", func() {
 		Expect(otherApply(h, "example-operator", map[string]any{"displayName": "operator-chosen-name"}, true)).To(Succeed())
 
 		later(h, time.Hour)
-		Expect(h.recorder.Applies()).To(HaveLen(16), "the drifted Device is applied once, without force")
+		Expect(h.recorder.Applies()).To(HaveLen(20), "the drifted Device is applied once, without force")
 		rec := recordFor(h.source(), "dcim/devices/1000", "Device")
 		Expect(rec.State).To(Equal(netboxv1alpha1.RecordStateQuarantined))
 		Expect(rec.Reason).To(Equal(plan.ReasonApplyConflict))
@@ -116,11 +116,11 @@ var _ = Describe("server-side apply field ownership", func() {
 		Expect(rec.State).To(Equal(netboxv1alpha1.RecordStateQuarantined))
 		Expect(rec.Reason).To(Equal(plan.ReasonImmutableChanged))
 		Expect(rec.Message).To(ContainSubstring("a hardware swap is a new Device"))
-		Expect(h.recorder.Applies()[15:]).NotTo(ContainElement(fleet.KindDevice+"/"+deviceName), "the Device is not applied again")
+		Expect(h.recorder.Applies()[19:]).NotTo(ContainElement(fleet.KindDevice+"/"+deviceName), "the Device is not applied again")
 		serial, _, _ := unstructured.NestedString(device(h).Object, "spec", "identity", "serial")
 		Expect(serial).To(Equal("SYNTH-CHASSIS-0001"))
 		// The claim moves with its Device, so its update is held too.
-		Expect(h.recorder.Applies()[15:]).NotTo(ContainElement(fleet.KindDeviceClaim + "/" + claimName))
+		Expect(h.recorder.Applies()[19:]).NotTo(ContainElement(fleet.KindDeviceClaim + "/" + claimName))
 		Expect(recordFor(h.source(), "dcim/devices/1000", "DeviceClaim").Reason).To(Equal(plan.ReasonDependencyBlocked))
 	})
 
@@ -164,6 +164,6 @@ var _ = Describe("server-side apply field ownership", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(h.recorder.Applies()).To(BeEmpty())
 		Expect(fleetCount(h)).To(BeZero())
-		Expect(h.source().Status.Plan.Create).To(Equal(int32(15)))
+		Expect(h.source().Status.Plan.Create).To(Equal(int32(19)))
 	})
 })

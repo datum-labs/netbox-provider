@@ -27,8 +27,9 @@ written.
 
 ## What it writes
 
-Racks, PowerFeeds, DeviceClaims, Devices with their components and internal
-mappings, and Cables, with only the physical facts in the
+Racks, PowerFeeds, Manufacturers and DeviceTypes (Fleet's hardware catalog,
+datum-cloud/fleet#107), DeviceClaims, Devices with their components, internal
+mappings and `deviceTypeRef`, and Cables, with only the physical facts in the
 [design](design.md#mapping-netbox-to-fleet). A Device in a role the mapping
 lists also gets `spec.bmc.endpoint` from NetBox's out-of-band IP. That copy
 is interim: Fleet assigns out-of-band BMC addresses to Networking/IPAM, and
@@ -115,8 +116,9 @@ kinds. datum-cloud/fleet#134 adds `patch` on every inventory kind, for
 server-side apply; the role still grants no `update`, `delete` or status
 verbs, so it can add and adjust records but never remove them. The YAML above
 is the role as #101 introduced it. This controller uses `create` and `patch`
-on Racks, PowerFeeds, DeviceClaims, Devices and Cables only; it never writes
-Facilities or Sites, even though the role would allow it.
+on Racks, PowerFeeds, Manufacturers, DeviceTypes, DeviceClaims, Devices and
+Cables only; it never writes Facilities or Sites, even though the role would
+allow it.
 
 This controller's own kinds stay on the cluster it runs on and are not
 registered in Milo, so Fleet needs no ProtectedResources for them.

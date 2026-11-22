@@ -28,24 +28,27 @@ const (
 	Version = "v1alpha1"
 )
 
-// Kinds this controller reads. It creates Racks, PowerFeeds, DeviceClaims,
-// Devices and Cables, and reads Facility to resolve mapped premises.
+// Kinds this controller reads. It writes Racks, PowerFeeds, Manufacturers,
+// DeviceTypes, DeviceClaims, Devices and Cables, and reads Facility to resolve
+// mapped premises.
 const (
-	KindFacility    = "Facility"
-	KindRack        = "Rack"
-	KindPowerFeed   = "PowerFeed"
-	KindDeviceClaim = "DeviceClaim"
-	KindDevice      = "Device"
-	KindCable       = "Cable"
+	KindFacility     = "Facility"
+	KindRack         = "Rack"
+	KindPowerFeed    = "PowerFeed"
+	KindManufacturer = "Manufacturer"
+	KindDeviceType   = "DeviceType"
+	KindDeviceClaim  = "DeviceClaim"
+	KindDevice       = "Device"
+	KindCable        = "Cable"
 )
 
 // ReadKinds are listed to observe existing Fleet state, in creation order.
-var ReadKinds = []string{KindFacility, KindRack, KindPowerFeed, KindDeviceClaim, KindDevice, KindCable}
+var ReadKinds = []string{KindFacility, KindRack, KindPowerFeed, KindManufacturer, KindDeviceType, KindDeviceClaim, KindDevice, KindCable}
 
-// WriteKinds are the only kinds ever created, in dependency order: a Cable
-// references Devices and PowerFeeds, a Device its DeviceClaim, and claims and
-// feeds their Rack.
-var WriteKinds = []string{KindRack, KindPowerFeed, KindDeviceClaim, KindDevice, KindCable}
+// WriteKinds are the only kinds ever written, in dependency order: a Cable
+// references Devices and PowerFeeds, a Device its DeviceClaim and DeviceType,
+// a DeviceType its Manufacturer, and claims and feeds their Rack.
+var WriteKinds = []string{KindRack, KindPowerFeed, KindManufacturer, KindDeviceType, KindDeviceClaim, KindDevice, KindCable}
 
 // GVK returns the GroupVersionKind for a Fleet inventory kind.
 func GVK(kind string) schema.GroupVersionKind {
@@ -133,8 +136,34 @@ type DeviceSpec struct {
 	ClaimRef          LocalReference     `json:"claimRef"`
 	Identity          DeviceIdentity     `json:"identity"`
 	BMC               *BMC               `json:"bmc,omitempty"`
+	DeviceTypeRef     *LocalReference    `json:"deviceTypeRef,omitempty"`
 	Components        []Component        `json:"components,omitempty"`
 	InternalMappings  []InternalMapping  `json:"internalMappings,omitempty"`
+}
+
+// ManufacturerSpec is the written subset of Manufacturer.spec.
+type ManufacturerSpec struct {
+	DisplayName   string   `json:"displayName"`
+	CanonicalName string   `json:"canonicalName"`
+	Aliases       []string `json:"aliases,omitempty"`
+}
+
+// ComponentTemplate is one nominal component of a DeviceType.
+type ComponentTemplate struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Type      string `json:"type"`
+	Connector string `json:"connector,omitempty"`
+	Positions int32  `json:"positions,omitempty"`
+}
+
+// DeviceTypeSpec is the written subset of DeviceType.spec.
+type DeviceTypeSpec struct {
+	DisplayName        string              `json:"displayName"`
+	ManufacturerRef    LocalReference      `json:"manufacturerRef"`
+	Model              string              `json:"model"`
+	ModelShape         *ModelShape         `json:"modelShape,omitempty"`
+	ComponentTemplates []ComponentTemplate `json:"componentTemplates,omitempty"`
 }
 
 // BMC is the written subset of Device.spec.bmc.

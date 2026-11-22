@@ -10,7 +10,7 @@ rules:
     resources: [facilities]
     verbs: [get, list]
   - apiGroups: [fleet.datumapis.com]
-    resources: [racks, powerfeeds, deviceclaims, devices, cables]
+    resources: [racks, powerfeeds, manufacturers, devicetypes, deviceclaims, devices, cables]
     verbs: [get, list, create, patch]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
