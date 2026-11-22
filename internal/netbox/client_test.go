@@ -305,12 +305,17 @@ func TestSnapshotAllowlistsFieldsAndIsStable(t *testing.T) {
 	counts := first.Counts()
 	if counts[netbox.CollectionDevices] != 9 || counts[netbox.CollectionRacks] != 2 || counts[netbox.CollectionDeviceTypes] != 5 ||
 		counts[netbox.CollectionInterfaces] != 11 || counts[netbox.CollectionPowerOutlets] != 2 || counts[netbox.CollectionCables] != 9 ||
-		counts[netbox.CollectionPowerFeeds] != 3 || counts[netbox.CollectionPowerPanels] != 1 || counts[netbox.CollectionRearPorts] != 0 {
+		counts[netbox.CollectionPowerFeeds] != 3 || counts[netbox.CollectionPowerPanels] != 1 || counts[netbox.CollectionRearPorts] != 1 || counts[netbox.CollectionFrontPorts] != 1 {
 		t.Fatalf("counts %v", counts)
 	}
 	outlet := first.Components[netbox.CollectionPowerOutlets][0]
 	if outlet.Device == nil || outlet.Device.ID != 1008 || outlet.PowerPort == nil || outlet.PowerPort.ID != 3010 || netbox.ChoiceValue(outlet.Type) != "iec-60320-c13" {
 		t.Errorf("power outlet decoded as %+v", outlet)
+	}
+	front := first.Components[netbox.CollectionFrontPorts][0]
+	if len(front.RearPorts) != 2 || front.RearPorts[0].RearPort == nil || *front.RearPorts[0].RearPort != 2100 ||
+		front.RearPorts[1].RearPort == nil || *front.RearPorts[1].RearPort != 2100 || *front.RearPorts[1].Position != 2 {
+		t.Errorf("front port rear mappings decoded as %+v", front.RearPorts)
 	}
 	cable := first.Cables[0]
 	if cable.Type != "dac-passive" || netbox.ChoiceValue(cable.Status) != "connected" || len(cable.ATerminations) != 1 ||

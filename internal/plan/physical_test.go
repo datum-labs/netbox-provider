@@ -68,7 +68,8 @@ func TestFrontPortsMapToExplicitRearPositions(t *testing.T) {
 		if got := outcomes(p); got["Device dcim/devices/1007"].action == plan.ActionCreate {
 			sw := candidate(t, p, fleet.KindDevice, "dcim/devices/1007")
 			mappings, _, _ := unstructured.NestedSlice(sw.Object.Object, "spec", "internalMappings")
-			if len(mappings) != len(fronts) {
+			// The fixture's own front port contributes two mappings.
+			if len(mappings) != len(fronts)+2 {
 				t.Errorf("mappings %v", mappings)
 			}
 		}
@@ -285,5 +286,33 @@ func TestCablesToUnidentifiedDevicesAreCreatable(t *testing.T) {
 	// A provider-hosted server has no Device, so its cable stays unresolved.
 	if got := outcomes(p)["record dcim/cables/5003"]; got.reason != plan.ReasonEndpointUnavailable {
 		t.Fatalf("%+v", got)
+	}
+}
+
+func TestFrontPortPositionMappings(t *testing.T) {
+	// NetBox 4.5 and later maps each front port position separately.
+	sw := candidate(t, plan.Build(input(t)), fleet.KindDevice, "dcim/devices/1007")
+	want := []any{
+		map[string]any{"from": map[string]any{"componentID": "front-ports-2101", "position": float64(1)}, "to": map[string]any{"componentID": "rear-ports-2100", "position": float64(1)}},
+		map[string]any{"from": map[string]any{"componentID": "front-ports-2101", "position": float64(2)}, "to": map[string]any{"componentID": "rear-ports-2100", "position": float64(2)}},
+	}
+	if !equalJSON(field(t, sw, "internalMappings"), want) {
+		t.Fatalf("internal mappings %v", field(t, sw, "internalMappings"))
+	}
+	for name, mutate := range map[string]func(*netbox.Component){
+		"position beyond the front port": func(c *netbox.Component) { c.RearPorts[1].Position = ptr[int64](3) },
+		"one position mapped twice":      func(c *netbox.Component) { c.RearPorts[1].Position = ptr[int64](1) },
+		"one rear position mapped twice": func(c *netbox.Component) { c.RearPorts[1].RearPortPosition = ptr[int64](1) },
+		"rear port on another device":    func(c *netbox.Component) { id := netbox.ID(3000); c.RearPorts[1].RearPort = &id },
+		"incomplete mapping":             func(c *netbox.Component) { c.RearPorts[0].RearPortPosition = nil },
+	} {
+		t.Run(name, func(t *testing.T) {
+			in := input(t)
+			mutate(&in.Snapshot.Components[netbox.CollectionFrontPorts][0])
+			got := outcomes(plan.Build(in))
+			if got["record dcim/devices/1007"].reason != plan.ReasonComponentsInvalid {
+				t.Fatalf("%+v", got["record dcim/devices/1007"])
+			}
+		})
 	}
 }

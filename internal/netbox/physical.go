@@ -2,6 +2,11 @@
 
 package netbox
 
+import (
+	"encoding/json"
+	"errors"
+)
+
 // Component, cable and power collections. Each component collection holds
 // one class of device component; ComponentCollections lists them in the
 // order they are read.
@@ -54,11 +59,40 @@ type Component struct {
 	AssetTag string  `json:"asset_tag,omitempty"`
 	// Positions is a rear port's number of positions.
 	Positions *int64 `json:"positions,omitempty"`
-	// RearPort and RearPortPosition map a front port to its rear port.
-	RearPort         *Ref   `json:"rear_port,omitempty"`
-	RearPortPosition *int64 `json:"rear_port_position,omitempty"`
+	// RearPorts maps each front port position to a rear port position
+	// (NetBox 4.5 and later). Older NetBox records one mapping in RearPort
+	// and RearPortPosition instead, for front port position 1.
+	RearPorts        []RearPortMapping `json:"rear_ports,omitempty"`
+	RearPort         *Ref              `json:"rear_port,omitempty"`
+	RearPortPosition *int64            `json:"rear_port_position,omitempty"`
 	// PowerPort maps a power outlet to the inlet that feeds it.
 	PowerPort *Ref `json:"power_port,omitempty"`
+}
+
+// RearPortMapping maps one front port position to a rear port position.
+type RearPortMapping struct {
+	Position         *int64 `json:"position,omitempty"`
+	RearPort         *ID    `json:"rear_port,omitempty"`
+	RearPortPosition *int64 `json:"rear_port_position,omitempty"`
+}
+
+// ID is a NetBox object ID that is serialized either as a number or as a
+// nested object with an id.
+type ID int64
+
+// UnmarshalJSON implements json.Unmarshaler.
+func (i *ID) UnmarshalJSON(data []byte) error {
+	var n int64
+	if err := json.Unmarshal(data, &n); err == nil {
+		*i = ID(n)
+		return nil
+	}
+	var ref Ref
+	if err := json.Unmarshal(data, &ref); err != nil || ref.ID == 0 {
+		return errors.New("invalid object reference")
+	}
+	*i = ID(ref.ID)
+	return nil
 }
 
 // Termination is one end of a cable: a component, power feed or circuit
