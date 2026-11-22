@@ -159,37 +159,73 @@ func (b *builder) internalMappings(device int64, p *deviceParts) {
 			if record.Device == nil || record.Device.ID != device {
 				continue
 			}
-			from := fleet.ComponentPosition{ComponentID: componentID(collection, record.ID), Position: 1}
-			var to fleet.ComponentPosition
 			if collection == netbox.CollectionFrontPorts {
-				if record.RearPort == nil || record.RearPortPosition == nil || *record.RearPortPosition < 1 || *record.RearPortPosition > 256 {
-					p.problem = from.ComponentID + " has no rear port and position; the path is never inferred"
-					continue
-				}
-				target, ok := b.components[netbox.CollectionRearPorts+"/"+strconv.FormatInt(record.RearPort.ID, 10)]
-				if !ok || target.device != device || int64(target.component.Positions) < *record.RearPortPosition {
-					p.problem = from.ComponentID + " maps to a rear port position that is not on this device"
-					continue
-				}
-				to = fleet.ComponentPosition{ComponentID: target.component.ID, Position: int32(*record.RearPortPosition)}
-				if usedRear[to] {
-					p.problem = to.ComponentID + " position " + strconv.Itoa(int(to.Position)) + " is mapped from more than one front port"
-					continue
-				}
-				usedRear[to] = true
-			} else {
-				if record.PowerPort == nil {
-					continue
-				}
-				target, ok := b.components[netbox.CollectionPowerPorts+"/"+strconv.FormatInt(record.PowerPort.ID, 10)]
-				if !ok || target.device != device {
-					p.problem = from.ComponentID + " is fed by a power port that is not on this device"
-					continue
-				}
-				to = fleet.ComponentPosition{ComponentID: target.component.ID, Position: 1}
+				b.frontPortMappings(device, p, record, usedRear)
+				continue
 			}
-			p.mappings = append(p.mappings, fleet.InternalMapping{From: from, To: to})
+			from := fleet.ComponentPosition{ComponentID: componentID(collection, record.ID), Position: 1}
+			if record.PowerPort == nil {
+				continue
+			}
+			target, ok := b.components[netbox.CollectionPowerPorts+"/"+strconv.FormatInt(record.PowerPort.ID, 10)]
+			if !ok || target.device != device {
+				p.problem = from.ComponentID + " is fed by a power port that is not on this device"
+				continue
+			}
+			p.mappings = append(p.mappings, fleet.InternalMapping{From: from, To: fleet.ComponentPosition{ComponentID: target.component.ID, Position: 1}})
 		}
+	}
+}
+
+// frontPortMappings records a front port's paths to rear port positions,
+// from NetBox's per-position mappings or its older single mapping.
+func (b *builder) frontPortMappings(device int64, p *deviceParts, record netbox.Component, usedRear map[fleet.ComponentPosition]bool) {
+	id := componentID(netbox.CollectionFrontPorts, record.ID)
+	type mapping struct{ from, rear, rearPosition *int64 }
+	var mappings []mapping
+	for _, m := range record.RearPorts {
+		var rear *int64
+		if m.RearPort != nil {
+			v := int64(*m.RearPort)
+			rear = &v
+		}
+		mappings = append(mappings, mapping{from: m.Position, rear: rear, rearPosition: m.RearPortPosition})
+	}
+	if len(mappings) == 0 && record.RearPort != nil {
+		one := int64(1)
+		mappings = append(mappings, mapping{from: &one, rear: &record.RearPort.ID, rearPosition: record.RearPortPosition})
+	}
+	if len(mappings) == 0 {
+		p.problem = id + " has no rear port and position; the path is never inferred"
+		return
+	}
+	frontPositions := int64(1)
+	if record.Positions != nil {
+		frontPositions = *record.Positions
+	}
+	usedFront := map[int64]bool{}
+	for _, m := range mappings {
+		if m.from == nil || m.rear == nil || m.rearPosition == nil || *m.from < 1 || *m.from > frontPositions || *m.rearPosition < 1 || *m.rearPosition > 256 {
+			p.problem = id + " has an incomplete rear port mapping; the path is never inferred"
+			return
+		}
+		if usedFront[*m.from] {
+			p.problem = id + " maps one position to more than one rear port position"
+			return
+		}
+		usedFront[*m.from] = true
+		target, ok := b.components[netbox.CollectionRearPorts+"/"+strconv.FormatInt(*m.rear, 10)]
+		if !ok || target.device != device || int64(target.component.Positions) < *m.rearPosition {
+			p.problem = id + " maps to a rear port position that is not on this device"
+			return
+		}
+		to := fleet.ComponentPosition{ComponentID: target.component.ID, Position: int32(*m.rearPosition)}
+		if usedRear[to] {
+			p.problem = to.ComponentID + " position " + strconv.Itoa(int(to.Position)) + " is mapped from more than one front port"
+			return
+		}
+		usedRear[to] = true
+		p.mappings = append(p.mappings, fleet.InternalMapping{From: fleet.ComponentPosition{ComponentID: id, Position: int32(*m.from)}, To: to})
 	}
 }
 
