@@ -28,7 +28,9 @@ holds the template's controller conventions.
 - Failed, partial or uncertain reads and writes are `Unknown`, never `Ready`.
   Retain the snapshot digest and mapping revision in status before any write.
 - Never infer readiness, free capacity, rack-unit occupancy, or chassis identity
-  from NetBox. Exact rack units are not importable.
+  from NetBox. Rack units are written only when the mapping asks for
+  `RackUnits` and NetBox records a whole-unit position, face and height; cable
+  lanes, media and component geometry are never guessed.
 - Keep tokens, kubeconfigs, NetBox exports and real inventory out of Git,
   status, logs and errors. Do not keep custom fields, config contexts or
   response bodies. Use synthetic fixtures with reserved example names only: no

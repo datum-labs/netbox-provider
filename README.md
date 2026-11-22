@@ -8,8 +8,8 @@ missing. It never changes, adopts or deletes an existing record.
 Fleet does not know this controller or NetBox exists. Fleet sees ordinary
 inventory records holding only physical facts; this controller correlates them
 with NetBox through its own `netbox.miloapis.com/*` labels and annotations. It
-targets Fleet's inventory schema without authorship fields (datum-cloud/fleet#105
-and #106) and needs the create-only importer role (#101).
+targets Fleet's inventory schema without authorship fields (datum-cloud/fleet#106)
+and the create-only importer role (#101).
 
 Generated from [`milo-os/controller-template`](https://github.com/milo-os/controller-template)
 (kubebuilder v4). Tested against a synthetic NetBox and Fleet's vendored CRD
@@ -41,8 +41,9 @@ create the planned records: racks first, then device claims, then devices. The
 status lists conflicts first and never contains serials or tokens. Any failed
 or uncertain read or write is reported as `Unknown`, never `Ready`.
 
-It imports racks, device claims and devices. Facilities stay operator-owned.
-Cables, power, components, circuits and Sites are not imported yet.
+It imports racks, power feeds, device claims, devices with their components,
+and cables. Facilities stay operator-owned. Circuits and Sites are not
+imported.
 
 Read the [design](docs/architecture/design.md) for the full rules, and the
 [Fleet usage](docs/architecture/fleet-contract.md) for exactly what it writes

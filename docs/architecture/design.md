@@ -43,7 +43,8 @@ implemented.
   `metal.datumapis.com` resource, networking, IPAM, routing, or service policy.
   Local RBAC is namespaced to `netbox-provider-system` and covers only this
   controller's kinds and Secrets; Fleet access is Milo IAM in the provider
-  project, `get`, `list` and `create` on four Fleet kinds and nothing else in
+  project: `get` and `list` on Facility, Rack, PowerFeed, DeviceClaim, Device
+  and Cable, `create` on all but Facility, and nothing else in
   Fleet's group. See [config/README.md](../../config/README.md).
 - Fleet has no code that refers to this controller, and the controller needs
   no Fleet API change; see [how it uses Fleet](fleet-contract.md). Its only
@@ -87,13 +88,16 @@ The reviewed interpretation of a source. Nothing is imported without it.
 | --- | --- |
 | `revision` | Reviewed mapping identifier, written as the `netbox.miloapis.com/mapping-revision` annotation. |
 | `facilities[]` | `{sourceType: Site\|Location, sourceID, facilityRef}`: maps NetBox premises to an **existing** Fleet Facility. A mapped location wins over its site. |
-| `devices[]` | Per-device decisions keyed by NetBox ID: `classification` (`Physical` or `Excluded` with a reason), `serialMeaning` (`Chassis`, `ProviderHostID` or `Unknown`), and `placement` (`Facility` or `RackMembership`). |
+| `devices[]` | Per-device decisions keyed by NetBox ID: `classification` (`Physical` or `Excluded` with a reason), `serialMeaning` (`Chassis`, `ProviderHostID` or `Unknown`), and `placement` (`Facility`, `RackMembership` or `RackUnits`). |
+| `cableMedia[]` | `{cableTypes, medium}`: the reviewed medium (`Copper`, `Fiber` or `Unknown`) of data cables by NetBox cable type. |
+| `untypedCableMedium` | The medium of data cables with no NetBox cable type. Unset leaves them `Unresolved`. |
 | `exclusions[]` | Role-slug exclusions with a reason, for example hosted VMs recorded in DCIM. Exclusions win over device decisions. |
 
 CEL enforces the combinations: excluded devices need a reason; physical devices
 need a serial meaning and placement; `providerSystem` is required for, and only
-for, `ProviderHostID`. Exact rack units are not representable, so an import can
-never assert an occupied footprint.
+for, `ProviderHostID`. `RackUnits` asserts an occupied footprint only from
+NetBox's own whole-unit position, face and device-type height; without all
+three the device is `Unresolved`, never placed by inference.
 
 ## Reconcile flow
 
@@ -109,15 +113,15 @@ never assert an occupied footprint.
    sets `ConfigurationResolved=False` and `Ready=False` with reason
    `TokenRejected` and is retried after the source's interval or one hour,
    whichever is longer, never through the error backoff.
-3. **Read Fleet.** List Facility, Rack, DeviceClaim and Device in the target
+3. **Read Fleet.** List Facility, Rack, PowerFeed, DeviceClaim, Device and Cable in the target
    namespace through an uncached client. Any failure sets `FleetObserved=Unknown`
    and `Ready=Unknown`.
 4. **Plan.** `internal/plan.Build` is a pure function of the snapshot, mapping
    and Fleet state. Every candidate is `Create`, `Unchanged`, `Quarantined` or
    `Unresolved`. There is no update, patch, adoption or delete action.
 5. **Apply, only in Create mode.** First write status naming the snapshot digest
-   and mapping revision that the creates come from. Then create racks, then
-   claims, then devices. `AlreadyExists` re-reads and classifies the record,
+   and mapping revision that the creates come from. Then create racks, power
+   feeds, claims, devices, and cables, each after what it references. `AlreadyExists` re-reads and classifies the record,
    never overwrites it. A definite rejection quarantines the record. Any other
    error makes the outcome unknown: `Applied=Unknown`, `Ready=Unknown`, its
    dependents are skipped, and the next reconcile re-observes Fleet before
@@ -139,7 +143,10 @@ a terminal error.
 | --- | --- | --- |
 | site, location | existing `Facility` | Only through `facilities[]`. The controller never creates Facilities: premises identity is operator-owned and a site name is not proof of premises. A missing or deleting Facility leaves dependents `Unresolved`. |
 | rack | `Rack` | `facilityRef` from the rack's mapped location, else its mapped site. `heightUnits` only when integral and 1 to 100. |
-| device | `DeviceClaim` + `Device` | Only devices listed as `Physical`. The claim is `lifecycle: Installation` with `Facility` or `RackMembership` placement and never position, height or face. The device binds to the claim, carries `topologyAuthority: Cable`, the model shape, and the asset tag as `assetTag`. |
+| device | `DeviceClaim` + `Device` | Only devices listed as `Physical`. The claim is `lifecycle: Installation` with `Facility`, `RackMembership` or `RackUnits` placement; only `RackUnits` writes position, height and face. The device binds to the claim, carries `topologyAuthority: Cable`, the model shape, the asset tag as `assetTag`, and its components. |
+| component | `Device.spec.components[]`, `internalMappings[]` | Interfaces, power ports and outlets, console and console server ports, front and rear ports, modules, inventory items and device bays, with ID `<collection>-<NetBox ID>` and the NetBox port type as `connector`. Virtual, LAG and bridge interfaces are networking, not components. A rear port needs a position count. Front ports map to their rear port position and outlets to the inlet that feeds them. If any component or path cannot be recorded exactly, or there are more than 256, the Device is `Unresolved/ComponentsInvalid`: records are create-only, so a partial list could never be completed. |
+| power feed | `PowerFeed` | `facilityRef` from its power panel's mapped location or site; `rackRef` when NetBox names a rack; supply type, voltage, current and phase; one `output` power outlet termination. A planned feed is excluded. The panel is not written: it has no Fleet kind, and an external reference would be a source field. |
+| cable | `Cable` | One lane between two planned endpoints: a component of a created Device or a feed output. An endpoint on a device without a created Device, outside the scope, logical, or a circuit leaves the cable `Unresolved`. Power cables must join an outlet and an inlet and console cables two console components; their medium follows. Data cables take the reviewed medium of their NetBox type. Planned cables are excluded; cables with several terminations per side and multi-position endpoints are not imported, because lanes are never inferred. |
 | device type | `identity.model`, `manufacturer`, `modelShape` | A device without a model is `Unresolved`; Fleet requires one. |
 | serial | depends on `serialMeaning` | `Chassis` with a value: `identity.serial` and `expectedIdentity.serial`, and the Device is created. Otherwise (`ProviderHostID`, `Unknown`, or an empty serial) nothing is written for the serial, the DeviceClaim is created, and the Device is `Unresolved/IdentityUnavailable`: Fleet requires a serial or system UUID for a Device, and identity is never invented. |
 | record identity | labels `netbox.miloapis.com/{source,type,id}` | Correlation is this controller's metadata, not a Fleet field. See [how it uses Fleet](fleet-contract.md#correlation-is-this-controllers-metadata). |
@@ -175,9 +182,10 @@ Names follow this controller's own rule: `netbox-` and the first 24 hex digits
 of the sha256 of the versioned tuple (sourceID, collection, ID, Fleet kind).
 NetBox renames never rename Fleet records.
 
-Cables, power feeds, components, circuits, operational Sites and
-`reportedPlacement` are **not imported yet**. Their NetBox records are simply
-not read. The Fleet importer's handling of them is the reference for later work.
+Circuits, power panels, operational Sites, service associations and
+`reportedPlacement` are **not imported**. Fleet's earlier offline importer
+(`hack/netbox_inventory.py`, removed by datum-cloud/fleet#106) is the reference
+for component IDs, internal mappings and cable endpoints.
 
 ## Safety rules and how they are enforced
 

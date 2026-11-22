@@ -41,7 +41,7 @@ var _ = Describe("Fleet admission of generated records", func() {
 	It("admits every candidate with no provenance, and rejects re-creation", func() {
 		h := newHarness()
 		p := fixturePlan(h)
-		Expect(p.Count(plan.ActionCreate)).To(Equal(5))
+		Expect(p.Count(plan.ActionCreate)).To(Equal(13))
 		kinds := map[string]bool{}
 		for _, kind := range fleet.WriteKinds {
 			for _, c := range p.Candidates {
@@ -62,7 +62,7 @@ var _ = Describe("Fleet admission of generated records", func() {
 			Expect(stored.Object["spec"]).NotTo(HaveKey("reportedPlacement"), c.Key())
 			Expect(stored.GetLabels()).To(HaveKeyWithValue(plan.LabelSource, testSystem))
 		}
-		Expect(kinds).To(Equal(map[string]bool{fleet.KindRack: true, fleet.KindDeviceClaim: true, fleet.KindDevice: true}))
+		Expect(kinds).To(Equal(map[string]bool{fleet.KindRack: true, fleet.KindPowerFeed: true, fleet.KindDeviceClaim: true, fleet.KindDevice: true, fleet.KindCable: true}))
 		// A second create of the same name never overwrites.
 		for _, c := range p.Candidates {
 			err := k8sClient.Create(ctx, c.Object.DeepCopy())
@@ -177,9 +177,12 @@ var _ = Describe("netbox.miloapis.com admission", func() {
 		Entry("physical without serial meaning", func(m *netboxv1alpha1.NetBoxMappingSpec) {
 			m.Devices = append(m.Devices, netboxv1alpha1.DeviceMapping{ID: 77, Classification: netboxv1alpha1.DeviceClassificationPhysical, Placement: netboxv1alpha1.PlacementScopeFacility})
 		}, "physical devices need serialMeaning and placement"),
-		Entry("exact rack units", func(m *netboxv1alpha1.NetBoxMappingSpec) {
+		Entry("power as a reviewed data medium", func(m *netboxv1alpha1.NetBoxMappingSpec) {
+			m.CableMedia = append(m.CableMedia, netboxv1alpha1.CableMediumRule{CableTypes: []string{"cat6"}, Medium: "Power"})
+		}, "Unsupported value"),
+		Entry("unknown placement", func(m *netboxv1alpha1.NetBoxMappingSpec) {
 			m.Devices = append(m.Devices, netboxv1alpha1.DeviceMapping{ID: 77, Classification: netboxv1alpha1.DeviceClassificationPhysical,
-				SerialMeaning: netboxv1alpha1.SerialMeaningUnknown, Placement: "RackUnits"})
+				SerialMeaning: netboxv1alpha1.SerialMeaningUnknown, Placement: "NonRackUnitMount"})
 		}, "Unsupported value"),
 		Entry("duplicate device", func(m *netboxv1alpha1.NetBoxMappingSpec) { m.Devices = append(m.Devices, m.Devices[0]) }, "Duplicate value"),
 		Entry("duplicate premises", func(m *netboxv1alpha1.NetBoxMappingSpec) { m.Facilities = append(m.Facilities, m.Facilities[0]) }, "Duplicate value"),

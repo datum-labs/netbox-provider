@@ -47,6 +47,39 @@ spec:
             description: NetBoxMappingSpec is the reviewed interpretation of a NetBox
               source.
             properties:
+              cableMedia:
+                description: |-
+                  CableMedia gives the reviewed medium of data cables by NetBox cable
+                  type. Power and console cables take their medium from the components
+                  they connect. A data cable whose type has no rule stays unresolved.
+                items:
+                  description: CableMediumRule gives the medium of data cables of
+                    some NetBox cable types.
+                  properties:
+                    cableTypes:
+                      description: CableTypes are NetBox cable type values, such as
+                        cat6 or smf.
+                      items:
+                        maxLength: 64
+                        minLength: 1
+                        type: string
+                      maxItems: 64
+                      minItems: 1
+                      type: array
+                      x-kubernetes-list-type: set
+                    medium:
+                      description: Medium is the Fleet medium of those cables.
+                      enum:
+                      - Copper
+                      - Fiber
+                      - Unknown
+                      type: string
+                  required:
+                  - cableTypes
+                  - medium
+                  type: object
+                maxItems: 64
+                type: array
               devices:
                 description: |-
                   Devices holds per-device reviewed decisions. Unlisted devices stay
@@ -71,6 +104,7 @@ spec:
                       enum:
                       - Facility
                       - RackMembership
+                      - RackUnits
                       type: string
                     reason:
                       description: Reason explains an exclusion.
@@ -179,6 +213,15 @@ spec:
                   annotation. Change it whenever the mapping changes.
                 maxLength: 253
                 minLength: 1
+                type: string
+              untypedCableMedium:
+                description: |-
+                  UntypedCableMedium is the medium of data cables that have no NetBox
+                  cable type. When unset, they stay unresolved.
+                enum:
+                - Copper
+                - Fiber
+                - Unknown
                 type: string
             required:
             - revision

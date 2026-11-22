@@ -1,0 +1,4 @@
+[
+  {"id": 3000, "device": {"id": 1000}, "name": "PSU1", "type": {"value": "iec-60320-c14"}},
+  {"id": 3010, "device": {"id": 1008}, "name": "Inlet", "type": {"value": "iec-60320-c20"}}
+]

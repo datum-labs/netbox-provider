@@ -8,9 +8,9 @@ the owner of the schema.
 | Field | Value |
 | --- | --- |
 | Source repository | `datum-cloud/fleet` |
-| Source | datum-cloud/fleet#106, the target inventory schema |
-| Branch head when vendored | `4ceb658cb2849b369fb5eaae07a7acdf85ae73ee` |
-| Last commit touching the file | `4ceb658cb2849b369fb5eaae07a7acdf85ae73ee` |
+| Source | datum-cloud/fleet#106 (merged), the target inventory schema |
+| Branch head when vendored | `5b60656759033b61674ee202a9ad94f4d49f4a64` (`feat/manual-inventory-records`) |
+| Last commit touching the file | `11778ec901812747ad7cb5e915f6c7658836bc04` |
 | sha256 | `21c081b63e8efb37d71d19a66616a972413b836ace24427de5d2b947f5ebbe9e` |
 
 The envtest suite checks the sha256, so re-vendoring must update this table and

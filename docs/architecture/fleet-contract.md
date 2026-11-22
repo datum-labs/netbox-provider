@@ -7,25 +7,26 @@ when from `metadata.creationTimestamp`.
 
 The schema is Fleet's target inventory schema from
 [datum-cloud/fleet#106](https://github.com/datum-cloud/fleet/pull/106) at
-`4ceb658cb2849b369fb5eaae07a7acdf85ae73ee`, vendored in
+`5b60656759033b61674ee202a9ad94f4d49f4a64`, vendored in
 [test/fleet](../../test/fleet/README.md).
 
 ## Fleet dependencies
 
 | Change | Status | Why this controller needs it |
 | --- | --- | --- |
-| [datum-cloud/fleet#105](https://github.com/datum-cloud/fleet/pull/105) | Open | Makes record-authorship metadata optional, so records without it are admitted. |
-| [datum-cloud/fleet#106](https://github.com/datum-cloud/fleet/pull/106) | Open | The target schema: removes record-authorship metadata and Fleet's NetBox import support. A Device's identity then needs a serial or system UUID. |
-| [datum-cloud/fleet#101](https://github.com/datum-cloud/fleet/pull/101) | Approved, not merged | The create-only importer role below. |
+| [datum-cloud/fleet#105](https://github.com/datum-cloud/fleet/pull/105) | Merged | Makes record-authorship metadata optional, so records without it are admitted. |
+| [datum-cloud/fleet#106](https://github.com/datum-cloud/fleet/pull/106) | Merged | The target schema: removes record-authorship metadata, component source references and Fleet's NetBox import support. A Device's identity needs a serial or system UUID. |
+| [datum-cloud/fleet#101](https://github.com/datum-cloud/fleet/pull/101) | Merged | The create-only importer role below. |
 
-Until #105 is deployed, deployed Fleet requires authorship metadata that this
-controller does not send, so creates are rejected. That is a definite
+A Fleet deployment older than #105 requires authorship metadata that this
+controller does not send, so its creates are rejected. That is a definite
 rejection: the record is quarantined with the API message and nothing is
-written. Keep sources in `mode: Observe` until then.
+written.
 
 ## What it writes
 
-Racks, DeviceClaims and Devices with only the physical facts in the
+Racks, PowerFeeds, DeviceClaims, Devices with their components and internal
+mappings, and Cables, with only the physical facts in the
 [design](design.md#mapping-netbox-to-fleet). It never writes Facilities,
 `reportedPlacement`, `MachineCapacity` or `deviceRef`, and never updates,
 patches or deletes a record.
@@ -92,8 +93,8 @@ spec:
 
 The role inherits the viewer role, adds `create` on all seven physical kinds,
 and grants no update, patch, delete or status verbs. This controller uses only
-`create` on Racks, DeviceClaims and Devices; it never creates Facilities, even
-though the role would allow it.
+`create` on Racks, PowerFeeds, DeviceClaims, Devices and Cables; it never
+creates Facilities or Sites, even though the role would allow it.
 
 This controller's own kinds stay on the cluster it runs on and are not
 registered in Milo, so Fleet needs no ProtectedResources for them.
