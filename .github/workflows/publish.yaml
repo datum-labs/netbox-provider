@@ -1,0 +1,59 @@
+name: Publish Docker Image
+
+on:
+  push:
+  release:
+    types: ['published']
+
+jobs:
+  publish-container-image:
+    permissions:
+      id-token: write
+      contents: read
+      packages: write
+    uses: datum-cloud/actions/.github/workflows/publish-docker.yaml@v1.28.0
+    with:
+      image-name: controller-template
+      registry-organization: milo-os
+      platforms: linux/amd64,linux/arm64
+    secrets: inherit
+
+  publish-ui-image:
+    permissions:
+      id-token: write
+      contents: read
+      packages: write
+    uses: datum-cloud/actions/.github/workflows/publish-docker.yaml@v1.28.0
+    with:
+      image-name: controller-template-ui
+      registry-organization: milo-os
+      platforms: linux/amd64,linux/arm64
+      dockerfile-path: ui/Dockerfile
+      context: ui
+    secrets: inherit
+
+  smoke-ui-image-arm64:
+    # The UI image installs its dependencies on the build platform and copies them into the arm64 image, so a
+    # dependency with a native addon would fail only when an arm64 pod starts. Loading the server bundle on a
+    # native arm64 runner fails here instead. The job needs Docker, so it stays on a GitHub-hosted runner.
+    needs: publish-ui-image
+    runs-on: ubuntu-24.04-arm
+    permissions: {}
+    env:
+      IMAGE: ghcr.io/milo-os/controller-template-ui:${{ needs.publish-ui-image.outputs.tag }}
+    steps:
+      - name: Load the server bundle on arm64
+        run: docker run --rm "$IMAGE" node -e 'import("./build/server/index.js")'
+
+  publish-kustomize-bundles:
+    permissions:
+      id-token: write
+      contents: read
+      packages: write
+    uses: datum-cloud/actions/.github/workflows/publish-kustomize-bundle.yaml@v1.28.0
+    with:
+      bundle-name: ghcr.io/milo-os/controller-template-kustomize
+      bundle-path: config
+      image-overlays: config/base/manager
+      image-name: ghcr.io/milo-os/controller-template
+    secrets: inherit

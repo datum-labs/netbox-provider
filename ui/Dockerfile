@@ -1,0 +1,47 @@
+FROM --platform=$BUILDPLATFORM node:26.13.1-alpine3.24 AS builder
+
+RUN apk add --no-cache --upgrade 'ca-certificates>=20261020-r0'
+RUN ! grep -q MIICTjCCAdOgAwIBAgIKPPYHqWhwDtqLhDAKBggqhkjOPQQDAzBrMQswCQYDVQQG /etc/ssl/certs/ca-certificates.crt
+
+RUN npm install -g pnpm@10.29.3
+
+WORKDIR /app
+
+COPY pnpm-workspace.yaml package.json pnpm-lock.yaml* ./
+COPY tsconfig.json vite.config.ts tailwind.config.js postcss.config.js ./
+COPY app/ ./app/
+
+RUN pnpm install --frozen-lockfile=false
+RUN pnpm run build
+
+FROM --platform=$BUILDPLATFORM node:26.13.1-alpine3.24 AS prod-deps
+
+RUN apk add --no-cache --upgrade 'ca-certificates>=20261020-r0'
+RUN ! grep -q MIICTjCCAdOgAwIBAgIKPPYHqWhwDtqLhDAKBggqhkjOPQQDAzBrMQswCQYDVQQG /etc/ssl/certs/ca-certificates.crt
+
+RUN npm install -g pnpm@10.29.3
+
+WORKDIR /app
+
+COPY --from=builder /app/package.json /app/pnpm-workspace.yaml ./
+COPY --from=builder /app/pnpm-lock.yaml* ./
+RUN pnpm install --prod --frozen-lockfile=false
+
+FROM node:26.13.1-alpine3.24 AS runtime
+
+RUN apk add --no-cache --upgrade 'ca-certificates>=20261020-r0'
+RUN ! grep -q MIICTjCCAdOgAwIBAgIKPPYHqWhwDtqLhDAKBggqhkjOPQQDAzBrMQswCQYDVQQG /etc/ssl/certs/ca-certificates.crt
+
+WORKDIR /app
+
+COPY --from=prod-deps /app/package.json ./
+COPY --from=prod-deps /app/node_modules ./node_modules
+COPY --from=builder /app/build ./build
+
+EXPOSE 3000
+ENV NODE_ENV=production
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD wget -q --spider http://localhost:3000/ || exit 1
+
+CMD ["node_modules/.bin/remix-serve", "build/server/index.js"]
