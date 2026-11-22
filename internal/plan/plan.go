@@ -155,26 +155,40 @@ type builder struct {
 	deviceByID map[int64]*Candidate
 	parts      map[int64]*deviceParts
 	bmcRoles   map[string]bool
-	bmcVRFs    map[int64]bool
-	ips        map[int64]netbox.IPAddress
-	components map[string]owned
-	logical    map[string]bool
-	premises   map[netboxv1alpha1.PremisesSourceType]map[int64]string
-	sourceAt   string
+	// manufacturerByID and deviceTypeByID are the catalog candidates by NetBox
+	// ID; canonical maps a planned Manufacturer's name to its canonicalName.
+	manufacturerByID map[int64]*Candidate
+	deviceTypeByID   map[int64]*Candidate
+	canonical        map[string]string
+	// deviceTypeOf is each Device candidate's NetBox device type; rebound
+	// marks Devices whose NetBox type no longer matches their deviceTypeRef.
+	deviceTypeOf map[*Candidate]int64
+	rebound      map[*Candidate]bool
+	bmcVRFs      map[int64]bool
+	ips          map[int64]netbox.IPAddress
+	components   map[string]owned
+	logical      map[string]bool
+	premises     map[netboxv1alpha1.PremisesSourceType]map[int64]string
+	sourceAt     string
 }
 
 // Build computes the plan. It never mutates its input.
 func Build(in Input) *Plan {
 	b := &builder{
-		in:         in,
-		plan:       &Plan{},
-		facilities: map[string]*unstructured.Unstructured{},
-		byKey:      map[string]*Candidate{},
-		rackByID:   map[int64]*Candidate{},
-		feedByID:   map[int64]*Candidate{},
-		deviceByID: map[int64]*Candidate{},
-		premises:   map[netboxv1alpha1.PremisesSourceType]map[int64]string{},
-		sourceAt:   in.Snapshot.ObservedAt.UTC().Format(time.RFC3339),
+		in:               in,
+		plan:             &Plan{},
+		facilities:       map[string]*unstructured.Unstructured{},
+		byKey:            map[string]*Candidate{},
+		rackByID:         map[int64]*Candidate{},
+		feedByID:         map[int64]*Candidate{},
+		deviceByID:       map[int64]*Candidate{},
+		manufacturerByID: map[int64]*Candidate{},
+		deviceTypeByID:   map[int64]*Candidate{},
+		canonical:        map[string]string{},
+		deviceTypeOf:     map[*Candidate]int64{},
+		rebound:          map[*Candidate]bool{},
+		premises:         map[netboxv1alpha1.PremisesSourceType]map[int64]string{},
+		sourceAt:         in.Snapshot.ObservedAt.UTC().Format(time.RFC3339),
 	}
 	for i := range in.Existing[fleet.KindFacility] {
 		f := &in.Existing[fleet.KindFacility][i]
@@ -195,10 +209,20 @@ func Build(in Input) *Plan {
 	b.mapPremises()
 	b.racks()
 	b.powerFeeds()
+	b.catalog()
+	b.catalogDuplicates()
 	b.collectComponents()
 	b.devices()
 	b.cables()
-	b.reconcile()
+	catalogKind := func(c *Candidate) bool { return c.Kind == fleet.KindManufacturer || c.Kind == fleet.KindDeviceType }
+	b.reconcile(catalogKind)
+	b.attachDeviceTypes()
+	b.reconcile(func(c *Candidate) bool { return !catalogKind(c) })
+	for c := range b.rebound {
+		if c.Action != ActionQuarantined {
+			c.Action, c.Reason, c.Message = ActionQuarantined, ReasonImmutableChanged, deviceTypeReboundMessage
+		}
+	}
 	b.collisions()
 	b.propagate()
 	b.retained()
@@ -498,12 +522,13 @@ func (b *builder) device(source string, device netbox.Device, m netboxv1alpha1.D
 		c.Message = note
 	}
 	b.deviceByID[device.ID] = c
+	b.deviceTypeOf[c] = device.DeviceType.ID
 }
 
 // reconcile compares candidates with existing records of the same name and
 // with existing records carrying the same correlation labels under another
 // name.
-func (b *builder) reconcile() {
+func (b *builder) reconcile(include func(*Candidate) bool) {
 	existing := map[string]*unstructured.Unstructured{}
 	bySource := map[string]string{}
 	for kind, items := range b.in.Existing {
@@ -516,7 +541,7 @@ func (b *builder) reconcile() {
 		}
 	}
 	for _, c := range b.plan.Candidates {
-		if c.Action != ActionCreate {
+		if c.Action != ActionCreate || !include(c) {
 			continue
 		}
 		ref, _ := KeyOf(c.Object)
@@ -590,6 +615,10 @@ var immutableFields = map[string][]struct{ field, message string }{
 	fleet.KindDevice: {
 		{"identity", "hardware identity changed in NetBox; Fleet keeps a Device's identity immutable, so a hardware swap is a new Device"},
 		{"claimRef", "the Device's claim changed; Fleet keeps claimRef immutable, so replacement hardware is a new Device"},
+	},
+	fleet.KindDeviceType: {
+		{"manufacturerRef", deviceTypeManufacturerMessage},
+		{"model", deviceTypeModelMessage},
 	},
 	fleet.KindDeviceClaim: {
 		{"placement", "placement changed in NetBox; Fleet keeps an installation's placement immutable, and a move needs an explicit handover"},
@@ -768,6 +797,12 @@ func (b *builder) retained() {
 	}
 	for _, c := range b.in.Snapshot.Cables {
 		present[TypeCable+"/"+strconv.FormatInt(c.ID, 10)] = true
+	}
+	for _, m := range b.in.Snapshot.Manufacturers {
+		present[TypeManufacturer+"/"+strconv.FormatInt(m.ID, 10)] = true
+	}
+	for _, t := range b.in.Snapshot.DeviceTypes {
+		present[TypeDeviceType+"/"+strconv.FormatInt(t.ID, 10)] = true
 	}
 	for _, kind := range fleet.WriteKinds {
 		for i := range b.in.Existing[kind] {

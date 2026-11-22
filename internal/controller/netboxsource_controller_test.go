@@ -50,10 +50,10 @@ var _ = Describe("NetBoxSource reconcile", func() {
 		Expect(condition(s, ConditionSourceObserved).Status).To(Equal(metav1.ConditionTrue))
 		Expect(condition(s, ConditionFleetObserved).Status).To(Equal(metav1.ConditionTrue))
 		Expect(condition(s, ConditionApplied)).To(SatisfyAll(
-			HaveField("Status", metav1.ConditionFalse), HaveField("Reason", ReasonObserveOnly), HaveField("Message", ContainSubstring("15 records would be created"))))
+			HaveField("Status", metav1.ConditionFalse), HaveField("Reason", ReasonObserveOnly), HaveField("Message", ContainSubstring("19 records would be created"))))
 		// The fixture deliberately leaves records unresolved, so review is required.
 		Expect(condition(s, ConditionReady)).To(SatisfyAll(HaveField("Status", metav1.ConditionFalse), HaveField("Reason", ReasonReviewRequired)))
-		Expect(*s.Status.Plan).To(Equal(netboxv1alpha1.PlanSummary{Create: 15, Unresolved: 10, Excluded: 3}))
+		Expect(*s.Status.Plan).To(Equal(netboxv1alpha1.PlanSummary{Create: 19, Unresolved: 11, Excluded: 3}))
 		Expect(s.Status.LastObservation.SnapshotDigest).To(HavePrefix("sha256:"))
 		Expect(s.Status.LastObservation.MappingRevision).To(Equal("example-reviewed-1"))
 		Expect(s.Status.Records[0].State).To(Equal(netboxv1alpha1.RecordStateUnresolved), "conflicts and unresolved records are listed first")
@@ -67,7 +67,7 @@ var _ = Describe("NetBoxSource reconcile", func() {
 		h := newHarness().withSourceAndToken(netboxv1alpha1.SourceModeCreate)
 		_, err := h.reconcile()
 		Expect(err).NotTo(HaveOccurred())
-		Expect(h.recorder.Applies()).To(HaveLen(15))
+		Expect(h.recorder.Applies()).To(HaveLen(19))
 		Expect(h.list(fleet.KindRack)).To(HaveLen(1))
 		Expect(h.list(fleet.KindPowerFeed)).To(HaveLen(1))
 		Expect(h.list(fleet.KindDeviceClaim)).To(HaveLen(5))
@@ -75,7 +75,7 @@ var _ = Describe("NetBoxSource reconcile", func() {
 		Expect(h.list(fleet.KindCable)).To(HaveLen(4), "cables are created only between created records")
 		s := h.source()
 		Expect(condition(s, ConditionApplied)).To(SatisfyAll(HaveField("Status", metav1.ConditionTrue), HaveField("Reason", ReasonApplied)))
-		Expect(s.Status.Plan.Created).To(Equal(int32(15)))
+		Expect(s.Status.Plan.Created).To(Equal(int32(19)))
 
 		// Every kind is created after the kinds it references.
 		creates := h.recorder.Applies()
@@ -103,9 +103,9 @@ var _ = Describe("NetBoxSource reconcile", func() {
 		h.r.Now = func() time.Time { return testNow.Add(time.Hour) }
 		_, err = h.reconcile()
 		Expect(err).NotTo(HaveOccurred())
-		Expect(h.recorder.Applies()).To(HaveLen(15), "records correlated by our labels are unchanged; nothing is written")
+		Expect(h.recorder.Applies()).To(HaveLen(19), "records correlated by our labels are unchanged; nothing is written")
 		s = h.source()
-		Expect(s.Status.Plan.Unchanged).To(Equal(int32(15)))
+		Expect(s.Status.Plan.Unchanged).To(Equal(int32(19)))
 		Expect(s.Status.Plan.Create).To(BeZero())
 		Expect(condition(s, ConditionApplied).Message).To(Equal("no records to write"))
 		Expect(s.Status.Plan.Update).To(BeZero(), "a steady state makes no apply calls")
@@ -132,9 +132,10 @@ var _ = Describe("NetBoxSource reconcile", func() {
 		Expect(recordFor(s, "dcim/racks/100", "Rack")).To(SatisfyAll(
 			HaveField("State", netboxv1alpha1.RecordStateQuarantined), HaveField("Reason", plan.ReasonNameConflict), HaveField("Message", ContainSubstring("Flux"))))
 		Expect(recordFor(s, "dcim/devices/1000", "Device").Reason).To(Equal(plan.ReasonDependencyBlocked))
-		// Only the claim and unidentified Device that do not depend on the
-		// rack are created.
-		Expect(h.recorder.Applies()).To(HaveLen(2))
+		// Only records that do not depend on the rack are written: the
+		// catalog, which is not placed, and one claim and its unidentified
+		// Device.
+		Expect(h.recorder.Applies()).To(HaveLen(6))
 		Expect(condition(s, ConditionReady).Reason).To(Equal(ReasonReviewRequired))
 	})
 
@@ -207,13 +208,13 @@ var _ = Describe("NetBoxSource reconcile", func() {
 		h := newHarness().withSourceAndToken(netboxv1alpha1.SourceModeCreate)
 		_, err := h.reconcile()
 		Expect(err).NotTo(HaveOccurred())
-		Expect(fleetCount(h)).To(Equal(15))
+		Expect(fleetCount(h)).To(Equal(19))
 
 		h.server.Remove(netbox.CollectionDevices, 1000)
 		h.r.Now = func() time.Time { return testNow.Add(time.Hour) }
 		_, err = h.reconcile()
 		Expect(err).NotTo(HaveOccurred())
-		Expect(fleetCount(h)).To(Equal(15))
+		Expect(fleetCount(h)).To(Equal(19))
 		s := h.source()
 		Expect(s.Status.Plan.RetainedMissingSource).To(Equal(int32(2)))
 		Expect(recordFor(s, "dcim/devices/1000", "")).To(HaveField("State", netboxv1alpha1.RecordStateRetainedMissingSource))
@@ -234,7 +235,7 @@ var _ = Describe("NetBoxSource reconcile", func() {
 		h.server.Fail(netbox.CollectionDevices, 0)
 		_, err = h.reconcile()
 		Expect(err).NotTo(HaveOccurred())
-		Expect(h.recorder.Applies()).To(HaveLen(15))
+		Expect(h.recorder.Applies()).To(HaveLen(19))
 		Expect(condition(h.source(), ConditionSourceObserved).Status).To(Equal(metav1.ConditionTrue))
 	})
 

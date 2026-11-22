@@ -42,18 +42,28 @@ func load[T any](t *testing.T, collection string) []T {
 
 func snapshot(t *testing.T) *netbox.Snapshot {
 	return &netbox.Snapshot{
-		ObservedAt:  observedAt,
-		Sites:       load[netbox.Site](t, netbox.CollectionSites),
-		Locations:   load[netbox.Location](t, netbox.CollectionLocations),
-		Racks:       load[netbox.Rack](t, netbox.CollectionRacks),
-		DeviceTypes: load[netbox.DeviceType](t, netbox.CollectionDeviceTypes),
-		Devices:     load[netbox.Device](t, netbox.CollectionDevices),
-		Components:  components(t),
-		Cables:      load[netbox.Cable](t, netbox.CollectionCables),
-		PowerPanels: load[netbox.PowerPanel](t, netbox.CollectionPowerPanels),
-		PowerFeeds:  load[netbox.PowerFeed](t, netbox.CollectionPowerFeeds),
-		IPAddresses: load[netbox.IPAddress](t, netbox.CollectionIPAddresses),
+		ObservedAt:    observedAt,
+		Sites:         load[netbox.Site](t, netbox.CollectionSites),
+		Locations:     load[netbox.Location](t, netbox.CollectionLocations),
+		Racks:         load[netbox.Rack](t, netbox.CollectionRacks),
+		DeviceTypes:   load[netbox.DeviceType](t, netbox.CollectionDeviceTypes),
+		Devices:       load[netbox.Device](t, netbox.CollectionDevices),
+		Components:    components(t),
+		Cables:        load[netbox.Cable](t, netbox.CollectionCables),
+		PowerPanels:   load[netbox.PowerPanel](t, netbox.CollectionPowerPanels),
+		PowerFeeds:    load[netbox.PowerFeed](t, netbox.CollectionPowerFeeds),
+		IPAddresses:   load[netbox.IPAddress](t, netbox.CollectionIPAddresses),
+		Manufacturers: load[netbox.Manufacturer](t, netbox.CollectionManufacturers),
+		Templates:     templates(t),
 	}
+}
+
+func templates(t *testing.T) map[string][]netbox.ComponentTemplate {
+	out := map[string][]netbox.ComponentTemplate{}
+	for _, collection := range netbox.TemplateCollections {
+		out[collection] = load[netbox.ComponentTemplate](t, collection)
+	}
+	return out
 }
 
 func components(t *testing.T) map[string][]netbox.Component {
@@ -158,34 +168,39 @@ func equalJSON(a, b any) bool {
 func TestFixturePlan(t *testing.T) {
 	p := plan.Build(input(t))
 	want := map[string]outcome{
-		"Rack dcim/racks/100":             {plan.ActionCreate, plan.ReasonNew},
-		"PowerFeed dcim/power-feeds/6000": {plan.ActionCreate, plan.ReasonNew},
-		"DeviceClaim dcim/devices/1000":   {plan.ActionCreate, plan.ReasonNew},
-		"Device dcim/devices/1000":        {plan.ActionCreate, plan.ReasonNew},
-		"DeviceClaim dcim/devices/1001":   {plan.ActionCreate, plan.ReasonNew},
-		"DeviceClaim dcim/devices/1002":   {plan.ActionCreate, plan.ReasonNew},
-		"Device dcim/devices/1002":        {plan.ActionCreate, plan.ReasonNew},
-		"DeviceClaim dcim/devices/1007":   {plan.ActionCreate, plan.ReasonNew},
-		"Device dcim/devices/1007":        {plan.ActionCreate, plan.ReasonNew},
-		"DeviceClaim dcim/devices/1008":   {plan.ActionCreate, plan.ReasonNew},
-		"Device dcim/devices/1008":        {plan.ActionCreate, plan.ReasonNew},
-		"Cable dcim/cables/5000":          {plan.ActionCreate, plan.ReasonNew},
-		"Cable dcim/cables/5001":          {plan.ActionCreate, plan.ReasonNew},
-		"Cable dcim/cables/5002":          {plan.ActionCreate, plan.ReasonNew},
-		"Cable dcim/cables/5008":          {plan.ActionCreate, plan.ReasonNew},
-		"record dcim/devices/1001":        {"Unresolved", plan.ReasonIdentityUnavailable},
-		"record dcim/racks/101":           {"Unresolved", plan.ReasonPremisesUnmapped},
-		"record dcim/devices/1003":        {"Excluded", plan.ReasonExcludedByRole},
-		"record dcim/devices/1004":        {"Unresolved", plan.ReasonDeviceUnmapped},
-		"record dcim/devices/1005":        {"Unresolved", plan.ReasonModelAbsent},
-		"record dcim/devices/1006":        {"Unresolved", plan.ReasonDependencyBlocked},
-		"record dcim/power-feeds/6001":    {"Excluded", plan.ReasonNotInstalled},
-		"record dcim/power-feeds/6002":    {"Unresolved", plan.ReasonPowerPanelAbsent},
-		"record dcim/cables/5003":         {"Unresolved", plan.ReasonEndpointUnavailable},
-		"record dcim/cables/5004":         {"Unresolved", plan.ReasonEndpointUnavailable},
-		"record dcim/cables/5005":         {"Excluded", plan.ReasonNotInstalled},
-		"record dcim/cables/5006":         {"Unresolved", plan.ReasonCableMediumUnreviewed},
-		"record dcim/cables/5007":         {"Unresolved", plan.ReasonEndpointUnsupported},
+		"Rack dcim/racks/100":                {plan.ActionCreate, plan.ReasonNew},
+		"Manufacturer dcim/manufacturers/50": {plan.ActionCreate, plan.ReasonNew},
+		"DeviceType dcim/device-types/500":   {plan.ActionCreate, plan.ReasonNew},
+		"DeviceType dcim/device-types/503":   {plan.ActionCreate, plan.ReasonNew},
+		"DeviceType dcim/device-types/504":   {plan.ActionCreate, plan.ReasonNew},
+		"record dcim/device-types/501":       {"Unresolved", plan.ReasonModelAbsent},
+		"PowerFeed dcim/power-feeds/6000":    {plan.ActionCreate, plan.ReasonNew},
+		"DeviceClaim dcim/devices/1000":      {plan.ActionCreate, plan.ReasonNew},
+		"Device dcim/devices/1000":           {plan.ActionCreate, plan.ReasonNew},
+		"DeviceClaim dcim/devices/1001":      {plan.ActionCreate, plan.ReasonNew},
+		"DeviceClaim dcim/devices/1002":      {plan.ActionCreate, plan.ReasonNew},
+		"Device dcim/devices/1002":           {plan.ActionCreate, plan.ReasonNew},
+		"DeviceClaim dcim/devices/1007":      {plan.ActionCreate, plan.ReasonNew},
+		"Device dcim/devices/1007":           {plan.ActionCreate, plan.ReasonNew},
+		"DeviceClaim dcim/devices/1008":      {plan.ActionCreate, plan.ReasonNew},
+		"Device dcim/devices/1008":           {plan.ActionCreate, plan.ReasonNew},
+		"Cable dcim/cables/5000":             {plan.ActionCreate, plan.ReasonNew},
+		"Cable dcim/cables/5001":             {plan.ActionCreate, plan.ReasonNew},
+		"Cable dcim/cables/5002":             {plan.ActionCreate, plan.ReasonNew},
+		"Cable dcim/cables/5008":             {plan.ActionCreate, plan.ReasonNew},
+		"record dcim/devices/1001":           {"Unresolved", plan.ReasonIdentityUnavailable},
+		"record dcim/racks/101":              {"Unresolved", plan.ReasonPremisesUnmapped},
+		"record dcim/devices/1003":           {"Excluded", plan.ReasonExcludedByRole},
+		"record dcim/devices/1004":           {"Unresolved", plan.ReasonDeviceUnmapped},
+		"record dcim/devices/1005":           {"Unresolved", plan.ReasonModelAbsent},
+		"record dcim/devices/1006":           {"Unresolved", plan.ReasonDependencyBlocked},
+		"record dcim/power-feeds/6001":       {"Excluded", plan.ReasonNotInstalled},
+		"record dcim/power-feeds/6002":       {"Unresolved", plan.ReasonPowerPanelAbsent},
+		"record dcim/cables/5003":            {"Unresolved", plan.ReasonEndpointUnavailable},
+		"record dcim/cables/5004":            {"Unresolved", plan.ReasonEndpointUnavailable},
+		"record dcim/cables/5005":            {"Excluded", plan.ReasonNotInstalled},
+		"record dcim/cables/5006":            {"Unresolved", plan.ReasonCableMediumUnreviewed},
+		"record dcim/cables/5007":            {"Unresolved", plan.ReasonEndpointUnsupported},
 	}
 	got := outcomes(p)
 	for k, w := range want {
@@ -341,8 +356,15 @@ func TestFacilityMustExistAndNotBeDeleting(t *testing.T) {
 			in := input(t)
 			in.Existing = existing
 			p := plan.Build(in)
-			if len(p.Candidates) != 0 {
-				t.Fatalf("planned %d candidates without the mapped Facility", len(p.Candidates))
+			placed := 0
+			for _, c := range p.Candidates {
+				if c.Kind != fleet.KindManufacturer && c.Kind != fleet.KindDeviceType {
+					placed++
+				}
+			}
+			// The catalog is not placed, so it does not depend on a Facility.
+			if placed != 0 {
+				t.Fatalf("planned %d placed candidates without the mapped Facility", placed)
 			}
 			if got := outcomes(p)["record dcim/racks/100"]; got.reason != plan.ReasonFacilityUnavailable {
 				t.Fatalf("rack outcome %+v", got)

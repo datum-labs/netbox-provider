@@ -84,6 +84,7 @@ type Rack struct {
 type DeviceType struct {
 	ID           int64     `json:"id"`
 	Model        string    `json:"model,omitempty"`
+	Slug         string    `json:"slug,omitempty"`
 	Manufacturer *NamedRef `json:"manufacturer,omitempty"`
 	UHeight      *Decimal  `json:"u_height,omitempty"`
 	IsFullDepth  *bool     `json:"is_full_depth,omitempty"`
@@ -169,6 +170,10 @@ type Snapshot struct {
 	PowerFeeds  []PowerFeed            `json:"powerFeeds"`
 	// IPAddresses are the devices' out-of-band IP records.
 	IPAddresses []IPAddress `json:"ipAddresses"`
+	// Manufacturers and Templates are read only for the device types the
+	// scoped devices use. Templates are keyed by collection.
+	Manufacturers []Manufacturer                 `json:"manufacturers"`
+	Templates     map[string][]ComponentTemplate `json:"templates"`
 }
 
 // Digest is the sha256 of the canonical JSON of the retained fields.
@@ -181,15 +186,19 @@ func (s *Snapshot) Digest() string {
 // Counts returns the number of records per collection.
 func (s *Snapshot) Counts() map[string]int32 {
 	counts := map[string]int32{
-		CollectionSites:       int32(len(s.Sites)),
-		CollectionLocations:   int32(len(s.Locations)),
-		CollectionRacks:       int32(len(s.Racks)),
-		CollectionDeviceTypes: int32(len(s.DeviceTypes)),
-		CollectionDevices:     int32(len(s.Devices)),
-		CollectionCables:      int32(len(s.Cables)),
-		CollectionPowerPanels: int32(len(s.PowerPanels)),
-		CollectionPowerFeeds:  int32(len(s.PowerFeeds)),
-		CollectionIPAddresses: int32(len(s.IPAddresses)),
+		CollectionSites:         int32(len(s.Sites)),
+		CollectionLocations:     int32(len(s.Locations)),
+		CollectionRacks:         int32(len(s.Racks)),
+		CollectionDeviceTypes:   int32(len(s.DeviceTypes)),
+		CollectionDevices:       int32(len(s.Devices)),
+		CollectionCables:        int32(len(s.Cables)),
+		CollectionPowerPanels:   int32(len(s.PowerPanels)),
+		CollectionPowerFeeds:    int32(len(s.PowerFeeds)),
+		CollectionIPAddresses:   int32(len(s.IPAddresses)),
+		CollectionManufacturers: int32(len(s.Manufacturers)),
+	}
+	for _, collection := range TemplateCollections {
+		counts[collection] = int32(len(s.Templates[collection]))
 	}
 	for _, collection := range ComponentCollections {
 		counts[collection] = int32(len(s.Components[collection]))
@@ -221,7 +230,7 @@ type Reader interface {
 // Snapshot reads every supported collection, sequentially. Any failure
 // returns an error and no snapshot.
 func (c *Client) Snapshot(ctx context.Context, scope Scope, now time.Time) (*Snapshot, error) {
-	snapshot := &Snapshot{ObservedAt: now.UTC().Truncate(time.Second), Components: map[string][]Component{}}
+	snapshot := &Snapshot{ObservedAt: now.UTC().Truncate(time.Second), Components: map[string][]Component{}, Templates: map[string][]ComponentTemplate{}}
 	steps := []struct {
 		collection string
 		filter     url.Values
@@ -276,29 +285,61 @@ func (c *Client) Snapshot(ctx context.Context, scope Scope, now time.Time) (*Sna
 			return nil, fmt.Errorf("%s: %w", step.collection, err)
 		}
 	}
-	// Out-of-band IP records are read by ID, a bounded number per request.
-	var ids []string
+	// Records the scoped devices refer to are read by ID, a bounded number
+	// per request: their out-of-band IPs, and the manufacturers and component
+	// templates of the device types they use.
+	var ipIDs, typeIDs, manufacturerIDs []string
+	usedType, usedManufacturer := map[int64]bool{}, map[int64]bool{}
 	for _, d := range snapshot.Devices {
 		if d.OOBIP != nil && d.OOBIP.ID > 0 {
-			ids = append(ids, strconv.FormatInt(d.OOBIP.ID, 10))
+			ipIDs = append(ipIDs, strconv.FormatInt(d.OOBIP.ID, 10))
+		}
+		if d.DeviceType != nil && !usedType[d.DeviceType.ID] {
+			usedType[d.DeviceType.ID] = true
+			typeIDs = append(typeIDs, strconv.FormatInt(d.DeviceType.ID, 10))
 		}
 	}
-	for start := 0; start < len(ids); start += ipAddressBatch {
-		raw, err := c.List(ctx, CollectionIPAddresses, url.Values{"id": ids[start:min(start+ipAddressBatch, len(ids))]})
-		if err != nil {
+	for _, t := range snapshot.DeviceTypes {
+		if usedType[t.ID] && t.Manufacturer != nil && !usedManufacturer[t.Manufacturer.ID] {
+			usedManufacturer[t.Manufacturer.ID] = true
+			manufacturerIDs = append(manufacturerIDs, strconv.FormatInt(t.Manufacturer.ID, 10))
+		}
+	}
+	var err error
+	if snapshot.IPAddresses, err = listByID[IPAddress](ctx, c, CollectionIPAddresses, "id", ipIDs); err != nil {
+		return nil, err
+	}
+	if snapshot.Manufacturers, err = listByID[Manufacturer](ctx, c, CollectionManufacturers, "id", manufacturerIDs); err != nil {
+		return nil, err
+	}
+	for _, collection := range TemplateCollections {
+		if snapshot.Templates[collection], err = listByID[ComponentTemplate](ctx, c, collection, "device_type_id", typeIDs); err != nil {
 			return nil, err
 		}
-		batch, err := decodeAll[IPAddress](raw)
-		if err != nil {
-			return nil, fmt.Errorf("%s: %w", CollectionIPAddresses, err)
-		}
-		snapshot.IPAddresses = append(snapshot.IPAddresses, batch...)
 	}
 	return snapshot, nil
 }
 
-// ipAddressBatch bounds the IDs in one ipam/ip-addresses request.
-const ipAddressBatch = 100
+// idBatch bounds the IDs in one request.
+const idBatch = 100
+
+// listByID reads the records of a collection whose key matches one of ids,
+// idBatch IDs per read. No IDs reads nothing.
+func listByID[T any](ctx context.Context, c *Client, collection, key string, ids []string) ([]T, error) {
+	out := []T{}
+	for start := 0; start < len(ids); start += idBatch {
+		raw, err := c.List(ctx, collection, url.Values{key: ids[start:min(start+idBatch, len(ids))]})
+		if err != nil {
+			return nil, err
+		}
+		batch, err := decodeAll[T](raw)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", collection, err)
+		}
+		out = append(out, batch...)
+	}
+	return out, nil
+}
 
 func decodeAll[T any](raw []json.RawMessage) ([]T, error) {
 	out := make([]T, 0, len(raw))

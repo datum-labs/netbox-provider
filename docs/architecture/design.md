@@ -43,8 +43,9 @@ implemented.
   `metal.datumapis.com` resource, networking, IPAM, routing, or service policy.
   Local RBAC is namespaced to `netbox-provider-system` and covers only this
   controller's kinds and Secrets; Fleet access is Milo IAM in the provider
-  project: `get` and `list` on Facility, Rack, PowerFeed, DeviceClaim, Device
-  and Cable, `create` on all but Facility, and nothing else in
+  project: `get` and `list` on Facility, Rack, PowerFeed, Manufacturer,
+  DeviceType, DeviceClaim, Device and Cable, `create` and `patch` on all but
+  Facility, and nothing else in
   Fleet's group. See [config/README.md](../../config/README.md).
 - Fleet has no code that refers to this controller, and the controller needs
   no Fleet API change; see [how it uses Fleet](fleet-contract.md). Its only
@@ -194,6 +195,52 @@ Circuits, power panels, operational Sites, service associations and
 (`hack/netbox_inventory.py`, removed by datum-cloud/fleet#106) is the reference
 for component IDs, internal mappings and cable endpoints.
 
+## Hardware catalog
+
+Fleet's hardware catalog (datum-cloud/fleet#107) records Manufacturers and
+DeviceTypes. The controller imports the catalog entries of the devices it
+imports, never the whole NetBox catalog: a device type is imported only when
+a device in the source's scope uses it and the mapping classifies that device
+as `Physical`, and a manufacturer only when one of those types names it. Their
+manufacturers and component templates are read by ID for those types, so
+the read stays bounded by the source's scope. There is no whole-catalog
+option.
+
+| NetBox | Fleet | Rule |
+| --- | --- | --- |
+| manufacturer | `Manufacturer` | `canonicalName` and `displayName` are NetBox's name. A name Fleet would reject (not printable ASCII, longer than 253 characters, starting with something other than a letter or digit, or ending in a space) is `Unresolved/CanonicalNameInvalid`; it is never altered to fit. `aliases` are not written: NetBox has no reviewed source for them. Two NetBox manufacturers with the same name ignoring case are both `Quarantined/CanonicalNameCollision`. |
+| device type | `DeviceType` | `manufacturerRef` names the controller's Manufacturer. `model` is the model key below. `displayName` is NetBox's model. `modelShape` comes from `u_height` and `is_full_depth`, each left out when NetBox records none. Two types of one manufacturer with the same key are both `Quarantined/ModelKeyCollision`, naming them. A type whose manufacturer or model changes in NetBox is `Quarantined/ImmutableChanged`: Fleet keeps both immutable. |
+| component templates | `DeviceType.spec.componentTemplates[]` | Interface, power port and outlet, console and console server port, front and rear port, module bay, device bay and inventory item templates, with the same type and connector vocabulary as installed components and IDs `<collection>-<NetBox ID>`, such as `interface-templates-12`. Virtual, LAG and bridge interface templates are not components. A rear port template needs a position count. If any template cannot be recorded exactly, or there are more than 256, the type is `Unresolved/TemplatesInvalid`. |
+| device's type | `Device.spec.deviceTypeRef` | Set on every created Device, identified or unidentified, whose type is written in the same plan. See below. |
+
+**Model key.** The key is the type's NetBox slug, or its model when it has no
+slug, lowercased, with every run of characters other than ASCII letters and
+digits replaced by one hyphen, and hyphens trimmed. `example_1u` and
+`Example 1U` both become `example-1u`. Non-ASCII letters are separators, so
+they never produce characters Fleet rejects. A type whose key is empty or
+longer than 253 characters is `Unresolved/ModelKeyInvalid`.
+
+**`deviceTypeRef`.** Fleet lets a Device gain a reference but never lose or
+change one.
+- A Device whose type is not written (unresolved, quarantined, or its
+  manufacturer is) is still created, without a reference. That is safe:
+  the reference can be added by a later `Update` once the type is written,
+  and it never blocks the Device's own record.
+- A Device that already has a reference keeps it in every apply, even when its
+  type stops being written, since removing it would be rejected.
+- A Device whose NetBox type changes keeps its reference and is
+  `Quarantined/ImmutableChanged`: the controller never rebinds it. A type
+  change that also changes the Device's manufacturer or model is quarantined
+  for the identity change first.
+- Records are applied Manufacturers first, then DeviceTypes, then Devices.
+
+**Other writers.** Fleet cannot enforce uniqueness across objects, so the
+controller checks. A Manufacturer from another writer with the same canonical
+name ignoring case, or a DeviceType from another writer for the same
+manufacturer (by canonical name) and model key, quarantines the controller's
+record as `Quarantined/CatalogDuplicate`, naming the other record, so a human
+decides which to keep. The other writer's record is never adopted or changed.
+
 ## Writes: server-side apply
 
 Every Fleet write is a server-side apply as field manager `netbox-provider`,
@@ -265,6 +312,7 @@ fixed budget.
 | Writes are non-forced server-side applies | The reconciler only calls `Apply` with field manager `netbox-provider`; tests wrap the Fleet client and fail on create, update, non-apply patch, delete, any status write, a forced apply, or another field manager | every reconcile spec |
 | Another writer's fields are kept, never taken | An apply conflict is `Quarantined/ApplyConflict`, naming the manager and field paths; other managers' fields survive applies | `keeps another manager's field`, `quarantines a conflict with another manager` |
 | Immutable fields stay immutable | A Device's identity or claim, or a claim's placement or lifecycle, that changes in NetBox is `Quarantined/ImmutableChanged` before any call | `quarantines a change to an immutable field`, `TestImmutableChangesAreQuarantined` |
+| Catalog records are never duplicated or rebound | A Manufacturer or DeviceType that another writer's record already describes is `Quarantined/CatalogDuplicate`; colliding model keys and canonical names are quarantined; a Device keeps its `deviceTypeRef` and is quarantined if NetBox moves it to another type | `TestOperatorWrittenCatalogRecordsAreNeverAdopted`, `TestModelKeyCollisionsAreQuarantined`, `TestImmutableCatalogChangesAreQuarantined`, `TestDeviceTypeRefsAreAddedLaterAndNeverRemoved`, `adds deviceTypeRef to Devices it applied` |
 | No two Devices share a BMC endpoint | A planned endpoint equal to another planned or existing Device's, from any writer, quarantines it | `TestDevicesNeverShareABMCEndpoint` |
 | Records not written by this controller are never adopted | Same name without matching correlation labels is `Quarantined/NameConflict`, even with an identical spec; Flux labels are named in the message | `never adopts an identical record that lacks this controller's labels`, `rejects an existing name from another writer`, `TestSameNameWithoutOurLabelsIsNeverAdopted` |
 | Equal records are no-ops; owned fields follow NetBox | Correlated by labels and this controller's apply ownership; unchanged digest and values send nothing, differences are `Update`. Records it did not apply are `Quarantined/NotApplyOwned` | `then is a no-op`, `TestOwnedFieldChangeIsUpdated`, `TestRecordNotAppliedByThisControllerIsNeverAdopted` |

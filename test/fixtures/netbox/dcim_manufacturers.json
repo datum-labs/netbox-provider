@@ -1,0 +1,4 @@
+[
+  {"id": 50, "name": "Example Vendor", "slug": "example-vendor", "description": "must-not-be-retained"},
+  {"id": 51, "name": "Example Hypervisor", "slug": "example-hypervisor"}
+]

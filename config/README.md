@@ -95,7 +95,7 @@ environment and must not be added to this repository.
 
 Bind the controller's Milo identity, in its one provider project, to a role
 with `get` and `list` on the physical kinds and `create` and `patch` on Rack,
-PowerFeed, DeviceClaim, Device and Cable. Server-side apply needs both: `create`
+PowerFeed, Manufacturer, DeviceType, DeviceClaim, Device and Cable. Server-side apply needs both: `create`
 for a record's first apply and `patch` for later ones. Fleet's
 `fleet.datumapis.com-inventory-importer` role (datum-cloud/fleet#101) grants
 `create` only, so it is not enough on its own; see
