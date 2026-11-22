@@ -6,28 +6,27 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
-	"time"
 
-	"k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/apimachinery/pkg/runtime"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
-	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
-	logf "sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
-	examplev1alpha1 "go.miloapis.com/controller-template/api/v1alpha1"
+	netboxv1alpha1 "go.miloapis.com/netbox-provider/api/v1alpha1"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
 
 var (
-	cfg       *rest.Config
-	k8sClient client.Client
-	testEnv   *envtest.Environment
-	ctx       context.Context
-	cancel    context.CancelFunc
+	cfg        *rest.Config
+	k8sClient  client.Client
+	testEnv    *envtest.Environment
+	testScheme *runtime.Scheme
+	ctx        context.Context
+	cancel     context.CancelFunc
 )
 
 func TestControllers(t *testing.T) {
@@ -36,13 +35,14 @@ func TestControllers(t *testing.T) {
 }
 
 var _ = BeforeSuite(func() {
-	logf.SetLogger(zap.New(zap.WriteTo(GinkgoWriter), zap.UseDevMode(true)))
-
 	ctx, cancel = context.WithCancel(context.TODO())
 
-	By("bootstrapping test environment")
+	By("bootstrapping a test API server with this controller's CRDs and the vendored Fleet inventory CRDs")
 	testEnv = &envtest.Environment{
-		CRDDirectoryPaths:     []string{filepath.Join("..", "..", "config", "base", "crd", "bases")},
+		CRDDirectoryPaths: []string{
+			filepath.Join("..", "..", "config", "base", "crd", "netbox.miloapis.com.yaml"),
+			filepath.Join("..", "..", "test", "fleet", "crds", "fleet.datumapis.com.yaml"),
+		},
 		ErrorIfCRDPathMissing: true,
 	}
 
@@ -51,30 +51,13 @@ var _ = BeforeSuite(func() {
 	Expect(err).NotTo(HaveOccurred())
 	Expect(cfg).NotTo(BeNil())
 
-	err = examplev1alpha1.AddToScheme(scheme.Scheme)
-	Expect(err).NotTo(HaveOccurred())
+	testScheme = runtime.NewScheme()
+	utilruntime.Must(clientgoscheme.AddToScheme(testScheme))
+	utilruntime.Must(netboxv1alpha1.AddToScheme(testScheme))
 
-	k8sClient, err = client.New(cfg, client.Options{Scheme: scheme.Scheme})
+	k8sClient, err = client.New(cfg, client.Options{Scheme: testScheme})
 	Expect(err).NotTo(HaveOccurred())
 	Expect(k8sClient).NotTo(BeNil())
-
-	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
-		Scheme: scheme.Scheme,
-	})
-	Expect(err).NotTo(HaveOccurred())
-
-	err = (&ResourceReconciler{}).SetupWithManager(mgr)
-	Expect(err).NotTo(HaveOccurred())
-
-	go func() {
-		defer GinkgoRecover()
-		err = mgr.Start(ctx)
-		Expect(err).NotTo(HaveOccurred())
-	}()
-
-	Eventually(func() bool {
-		return mgr.GetCache().WaitForCacheSync(ctx)
-	}, 10*time.Second, 100*time.Millisecond).Should(BeTrue())
 })
 
 var _ = AfterSuite(func() {

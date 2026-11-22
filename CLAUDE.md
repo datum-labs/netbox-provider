@@ -1,76 +1,54 @@
-# INITIALIZATION REQUIRED
+# netbox-provider
 
-If `.claude/.initialized` does not exist in this repository, **invoke the `/init-service` skill immediately** as your first action — before responding to any user message. The SessionStart hook injects a reminder when this is the case. Do not ask for permission; just run it.
-
----
-
-# controller-template
-
-A template repository for building Kubernetes controllers that connect to the Milo control plane. Based on kubebuilder v4, modeled after the `billing` service conventions.
+A Kubernetes controller that imports NetBox physical inventory into Fleet,
+generated from `milo-os/controller-template` (kubebuilder v4). Read
+[AGENTS.md](AGENTS.md) first: its safety rules override anything below.
 
 ## Architecture
 
-- **CRD-based**: Uses kubebuilder v4 CRDs (not aggregated API server)
-- **Controller-runtime**: Reconciler for lifecycle management
-- **Milo control plane aware**: `KubeconfigPath` config field allows pointing the controller at the Milo API server
-- **Webhooks**: Validating and defaulting webhook support wired up
-
-## API Group
-
-- Group: `example.miloapis.com`
-- Version: `v1alpha1`
-- Resources: `Resource` (rename when forking this template)
+- **CRD-based**: kubebuilder v4 CRDs in `netbox.miloapis.com/v1alpha1`
+  (`NetBoxSource`, `NetBoxMapping`), validated with CEL. No webhooks.
+- **Deployment**: `config/` follows Fleet's layout and RBAC split. RBAC is
+  hand-written and namespaced; do not add kubebuilder RBAC markers.
+- **Two API servers**: the manager's own (`kubeconfigPath`) stores this
+  controller's kinds and token Secrets; Fleet records are read and created on
+  `fleet.kubeconfigPath`, normally the Milo provider project control plane.
+- **Fleet as unstructured**: `internal/fleet` mirrors only the written fields;
+  `test/fleet/crds` vendors Fleet's CRD for envtest.
 
 ## Repo Layout
 
 ```
-controller-template/
-├── cmd/controller-template/main.go  # Binary entrypoint
-├── api/v1alpha1/                     # CRD type definitions
+netbox-provider/
+├── cmd/netbox-provider/        # Binary entrypoint and cobra commands
+├── api/v1alpha1/               # NetBoxSource and NetBoxMapping types
 ├── internal/
-│   ├── config/                       # Operator configuration
-│   └── controller/                   # Reconcilers
-├── config/                           # Kustomize manifests
-│   ├── base/                         # Core resources
-│   ├── components/                   # Optional components
-│   └── overlays/                     # Environment-specific
-├── ui/                               # Remix UI (React + datum-ui)
-│   ├── app/
-│   │   ├── components/AppLayout.tsx  # Sidebar + breadcrumb layout
-│   │   ├── lib/                      # k8s.server, kubeconfig.server, types, format
-│   │   ├── routes/                   # File-based Remix routes
-│   │   └── styles/index.css          # Tailwind + datum-ui theme
-│   ├── Dockerfile
-│   └── package.json
-├── hack/                             # Scripts and boilerplate
-└── test/e2e/                         # Chainsaw E2E tests
+│   ├── config/                 # Operator configuration (NetBoxSourceOperator)
+│   ├── controller/             # Reconciler and envtest suite
+│   ├── fleet/                  # Source-agnostic Fleet mirror and naming rule
+│   ├── netbox/                 # Bounded GET-only NetBox reader (+ netboxtest fake)
+│   └── plan/                   # Pure planning: NetBox + mapping + Fleet -> plan
+├── build/manager.Dockerfile    # Manager image
+├── config/                     # Kustomize roots in Fleet's layout; see config/README.md
+├── docs/architecture/          # Design and how the controller uses Fleet
+├── test/fixtures/netbox/       # Synthetic NetBox collections and mapping
+├── test/fleet/                 # Vendored Fleet CRD and where it came from
+└── hack/                       # Boilerplate and doc checks
 ```
-
-## Using This Template
-
-When forking this template for a new service:
-
-1. Replace `controller-template` → `your-service-name` throughout
-2. Replace `example.miloapis.com` → `your-group.miloapis.com`
-3. Replace `Resource` / `resource` → your CRD kind
-4. Replace `ControllerTemplateOperator` → `YourServiceOperator` in `internal/config/config.go`
-5. Update `go.mod` module path: `go.miloapis.com/your-service-name`
-6. Run `task generate && task manifests` to regenerate code and manifests
-7. Update `config/base/manager/config.yaml` and `config/overlays/dev/config.yaml`
 
 ## Connecting to the Milo Control Plane
 
-The operator config supports a `kubeconfigPath` field that points at Milo's API server:
-
 ```yaml
 apiVersion: apiserver.config.miloapis.com/v1alpha1
-kind: ControllerTemplateOperator
+kind: NetBoxSourceOperator
 metricsServer:
   bindAddress: "0"
-kubeconfigPath: /etc/milo/kubeconfig
+fleet:
+  kubeconfigPath: /etc/milo/kubeconfig
 ```
 
-When `kubeconfigPath` is empty, the controller falls back to in-cluster config, which is the default for development against a local kind cluster.
+When a kubeconfig path is empty, the controller falls back to in-cluster
+config, the default for local kind development.
 
 ## Reconcile errors
 
@@ -80,29 +58,27 @@ Return an error from `Reconcile` only when a retry can fix it. controller-runtim
 - **A wait for something else**, such as another object becoming ready or dependents going away: set a condition, watch what you wait for, and return no error. When you cannot watch it, return `ctrl.Result{RequeueAfter: <poll interval>}`. Do not use `Result.Requeue`, which controller-runtime deprecates. [resend-provider's `finalizer_wait.go`](https://github.com/milo-os/resend-provider/blob/6c8e2b0745735dfffe1dd469278ae19ab03abc32/internal/controller/finalizer_wait.go) does this for a finalizer.
 - **Anything else**, such as a timeout, a conflict or a server error: return the error, and controller-runtime retries it.
 
+In this controller: NetBox and Fleet read failures set Unknown conditions and
+return the error; a missing Secret or mapping sets a condition and polls or
+watches; an invalid URL that passed admission is terminal.
+
 ## Verification Commands
 
 ```bash
-# Controller
 task build                    # Build binary
-task test                     # Run tests
+task test                     # Run tests with envtest
 task lint                     # Run linter
+task validate                 # gofmt, vet, kustomize, doc links
 task generate                 # Run code generation
-task manifests                # Generate CRD/RBAC/webhook manifests
-task dev:setup                # Bootstrap kind cluster + deploy
-task dev:redeploy             # Rebuild and redeploy
-
-# UI
-task ui:install               # Install UI dependencies (pnpm)
-task ui:dev                   # Start dev server at http://localhost:3000
-task ui:build                 # Production build
-task ui:type-check            # TypeScript check
+task manifests                # Generate config/base/crd/netbox.miloapis.com.yaml
+task manifests:validate       # Render every kustomize entry point
+task standalone:setup         # Bootstrap kind cluster + synthetic standalone root
+task standalone:redeploy      # Rebuild and restart the standalone manager
 ```
 
 ## Metrics and logs
 
-Create every metric and logger through go.miloapis.com/instrumentation (Go)
-or @miloapis/instrumentation (TypeScript), naming labels with its labels
-constants. The instrumentation adoption test enforces this. When it fails,
-follow its message, which links to
+Create every metric and logger through go.miloapis.com/instrumentation (Go),
+naming labels with its labels constants. The instrumentation adoption test
+enforces this. When it fails, follow its message, which links to
 https://github.com/milo-os/instrumentation/blob/main/ADOPTING.md.

@@ -1,0 +1,9 @@
+[
+  {"id": 1000, "name": "example-server-a", "device_type": {"id": 500, "model": "Example 1U Server"}, "role": {"id": 7, "slug": "server"}, "site": {"id": 1}, "location": {"id": 10}, "rack": {"id": 100}, "position": 12, "face": {"value": "front"}, "serial": "SYNTH-CHASSIS-0001", "asset_tag": "SYNTH-ASSET-0001", "status": {"value": "active"}, "config_context": {"synthetic": "must-not-be-retained"}, "custom_fields": {"oob_password": "must-not-be-retained"}},
+  {"id": 1001, "name": "example-server-b", "device_type": {"id": 500}, "role": {"id": 7, "slug": "server"}, "site": {"id": 1}, "location": {"id": 10}, "rack": {"id": 100}, "serial": "SYNTH-HOST-0002", "asset_tag": null, "status": {"value": "planned"}},
+  {"id": 1002, "name": "example-server-c", "device_type": {"id": 500}, "device_role": {"id": 7, "slug": "server"}, "site": {"id": 1}, "location": {"id": 10}, "rack": null, "serial": "SYNTH-UNKNOWN-0003", "asset_tag": null},
+  {"id": 1003, "name": "example-vm-a", "device_type": {"id": 502}, "role": {"id": 9, "slug": "hosted-vm"}, "site": {"id": 1}, "location": null, "rack": null, "serial": "", "asset_tag": null},
+  {"id": 1004, "name": "example-server-unreviewed", "device_type": {"id": 500}, "role": {"id": 7, "slug": "server"}, "site": {"id": 1}, "location": {"id": 10}, "rack": {"id": 100}, "serial": "SYNTH-CHASSIS-0004", "asset_tag": null},
+  {"id": 1005, "name": "example-server-no-model", "device_type": {"id": 501}, "role": {"id": 7, "slug": "server"}, "site": {"id": 1}, "location": {"id": 10}, "rack": {"id": 100}, "serial": "", "asset_tag": null},
+  {"id": 1006, "name": "example-server-unmapped-rack", "device_type": {"id": 500}, "role": {"id": 7, "slug": "server"}, "site": {"id": 2}, "location": null, "rack": {"id": 101}, "serial": "SYNTH-CHASSIS-0006", "asset_tag": null}
+]

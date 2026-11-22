@@ -1,0 +1,4 @@
+[
+  {"id": 100, "name": "Example Rack 01", "site": {"id": 1}, "location": {"id": 10}, "u_height": 42},
+  {"id": 101, "name": "Example Rack 02", "site": {"id": 2}, "location": null, "u_height": 42}
+]

@@ -1,0 +1,37 @@
+name: Publish netbox-provider artifacts
+
+on:
+  push:
+  release:
+    types: [published]
+
+jobs:
+  publish-container-image:
+    permissions:
+      id-token: write
+      contents: read
+      packages: write
+    uses: datum-cloud/actions/.github/workflows/publish-docker.yaml@v1.28.0
+    with:
+      image-name: netbox-provider
+      registry-organization: datum-labs
+      dockerfile-path: build/manager.Dockerfile
+      platforms: linux/amd64,linux/arm64
+    secrets: inherit
+
+  # The bundle carries config/; the publisher stamps the exact manager image
+  # tag into config/base/manager so an environment consumes one matched image
+  # and manifest revision.
+  publish-kustomize-bundle:
+    needs: [publish-container-image]
+    permissions:
+      id-token: write
+      contents: read
+      packages: write
+    uses: datum-cloud/actions/.github/workflows/publish-kustomize-bundle.yaml@v1.28.0
+    with:
+      bundle-name: ghcr.io/datum-labs/netbox-provider-kustomize
+      bundle-path: config
+      images: |
+        - { path: config/base/manager, name: ghcr.io/datum-labs/netbox-provider, tag: "${{ needs.publish-container-image.outputs.tag }}" }
+    secrets: inherit

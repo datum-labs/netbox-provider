@@ -10,14 +10,14 @@ import (
 // RegisterDefaults adds defaulters functions to the given scheme.
 // Public to allow building arbitrary schemes and plugins.
 func RegisterDefaults(scheme *runtime.Scheme) error {
-	scheme.AddTypeDefaultingFunc(&ControllerTemplateOperator{}, func(obj interface{}) {
-		SetObjectDefaults_ControllerTemplateOperator(obj.(*ControllerTemplateOperator))
+	scheme.AddTypeDefaultingFunc(&NetBoxSourceOperator{}, func(obj interface{}) {
+		SetObjectDefaults_NetBoxSourceOperator(obj.(*NetBoxSourceOperator))
 	})
 	return nil
 }
 
-func SetObjectDefaults_ControllerTemplateOperator(in *ControllerTemplateOperator) {
-	SetDefaults_ControllerTemplateOperator(in)
+func SetObjectDefaults_NetBoxSourceOperator(in *NetBoxSourceOperator) {
+	SetDefaults_NetBoxSourceOperator(in)
 	SetDefaults_MetricsServerConfig(&in.MetricsServer)
 	SetDefaults_TLSConfig(&in.MetricsServer.TLS)
 	if in.WebhookServer != nil {

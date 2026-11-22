@@ -1,0 +1,4 @@
+[
+  {"id": 1, "name": "Example Site One", "slug": "example-one", "url": "https://netbox.example.invalid/api/dcim/sites/1/", "custom_fields": {"synthetic_secret": "must-not-be-retained"}},
+  {"id": 2, "name": "Example Site Two", "slug": "example-two", "comments": "synthetic comment that must not be retained"}
+]

@@ -1,0 +1,13 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: netbox-provider-manager-leader-election
+  namespace: netbox-provider-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: netbox-provider-manager-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: netbox-provider-manager
+    namespace: netbox-provider-system

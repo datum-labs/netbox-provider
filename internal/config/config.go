@@ -26,8 +26,8 @@ import (
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // +k8s:defaulter-gen=true
 
-// ControllerTemplateOperator is the configuration for the controller-template operator.
-type ControllerTemplateOperator struct {
+// NetBoxSourceOperator is the configuration for the netbox-provider operator.
+type NetBoxSourceOperator struct {
 	metav1.TypeMeta
 
 	MetricsServer MetricsServerConfig `json:"metricsServer"`
@@ -37,17 +37,41 @@ type ControllerTemplateOperator struct {
 	// is required.
 	WebhookServer *WebhookServerConfig `json:"webhookServer,omitempty"`
 
-	// KubeconfigPath is the path to the kubeconfig file pointing at the Milo
-	// control plane API server where resources are stored. When empty, the
-	// controller falls back to in-cluster config / $KUBECONFIG via
-	// ctrl.GetConfig(), which is useful for local development.
+	// KubeconfigPath is the path to the kubeconfig file pointing at the API
+	// server that stores this controller's own NetBoxSource and NetBoxMapping
+	// resources and their token Secrets. When empty, the controller falls
+	// back to in-cluster config / $KUBECONFIG via ctrl.GetConfig(), which is
+	// useful for local development.
 	KubeconfigPath string `json:"kubeconfigPath,omitempty"`
+
+	// Fleet configures where Fleet inventory records are read and created.
+	Fleet FleetConfig `json:"fleet"`
+}
+
+// +k8s:deepcopy-gen=true
+
+// FleetConfig configures the Fleet inventory API this controller writes to.
+type FleetConfig struct {
+	// KubeconfigPath points at the Milo provider project control plane that
+	// serves fleet.datumapis.com inventory. When empty, the controller's own
+	// API server is used, which suits local development with the vendored
+	// Fleet CRDs installed. NetBox tokens never leave the controller's own
+	// API server.
+	KubeconfigPath string `json:"kubeconfigPath,omitempty"`
+}
+
+// FleetRestConfig returns the *rest.Config for the Fleet inventory API.
+func (c *NetBoxSourceOperator) FleetRestConfig() (*rest.Config, error) {
+	if c.Fleet.KubeconfigPath == "" {
+		return c.RestConfig()
+	}
+	return clientcmd.BuildConfigFromFlags("", c.Fleet.KubeconfigPath)
 }
 
 // RestConfig returns the *rest.Config used to connect to the Milo control plane.
 // When KubeconfigPath is empty it falls back to the standard
 // controller-runtime config resolution (in-cluster / $KUBECONFIG).
-func (c *ControllerTemplateOperator) RestConfig() (*rest.Config, error) {
+func (c *NetBoxSourceOperator) RestConfig() (*rest.Config, error) {
 	if c.KubeconfigPath == "" {
 		return ctrl.GetConfig()
 	}
@@ -203,18 +227,18 @@ func SetDefaults_TLSConfig(obj *TLSConfig) {
 	}
 }
 
-// SetDefaults_ControllerTemplateOperator sets defaults for ControllerTemplateOperator.
-// The generated SetObjectDefaults_ControllerTemplateOperator handles calling nested
+// SetDefaults_NetBoxSourceOperator sets defaults for NetBoxSourceOperator.
+// The generated SetObjectDefaults_NetBoxSourceOperator handles calling nested
 // defaults (MetricsServerConfig, WebhookServerConfig, TLSConfig), so this
 // function only sets top-level defaults.
-func SetDefaults_ControllerTemplateOperator(obj *ControllerTemplateOperator) {
+func SetDefaults_NetBoxSourceOperator(obj *NetBoxSourceOperator) {
 	// Top-level defaults are handled by nested SetDefaults_* functions
-	// which are called by the generated SetObjectDefaults_ControllerTemplateOperator.
+	// which are called by the generated SetObjectDefaults_NetBoxSourceOperator.
 }
 
 func init() {
 	SchemeBuilder.Register(func(scheme *runtime.Scheme) error {
-		scheme.AddKnownTypes(GroupVersion, &ControllerTemplateOperator{})
+		scheme.AddKnownTypes(GroupVersion, &NetBoxSourceOperator{})
 		metav1.AddToGroupVersion(scheme, GroupVersion)
 		return nil
 	})
