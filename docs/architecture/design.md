@@ -153,7 +153,7 @@ a terminal error.
 | component | `Device.spec.components[]`, `internalMappings[]` | Interfaces, power ports and outlets, console and console server ports, front and rear ports, modules, inventory items and device bays, with ID `<collection>-<NetBox ID>` and the NetBox port type as `connector`. Virtual, LAG and bridge interfaces are networking, not components. A rear port needs a position count. Each front port position maps to its rear port position (NetBox 4.5 and later list one mapping per position; older NetBox records one), and outlets map to the inlet that feeds them. If any component or path cannot be recorded exactly, or there are more than 256, the Device is `Unresolved/ComponentsInvalid`: a Device's components are written in one apply, so a partial list is never recorded. |
 | power feed | `PowerFeed` | `facilityRef` from its power panel's mapped location or site; `rackRef` when NetBox names a rack; supply type, voltage, current and phase; one `output` power outlet termination. A planned feed is excluded. The panel is not written: it has no Fleet kind, and an external reference would be a source field. |
 | cable | `Cable` | One lane between two planned endpoints: a component of a created Device or a feed output. An endpoint on a device without a created Device, outside the scope, logical, or a circuit leaves the cable `Unresolved`. Power cables must join an outlet and an inlet and console cables two console components; their medium follows. Data cables take the reviewed medium of their NetBox type. Planned cables are excluded; cables with several terminations per side and multi-position endpoints are not imported, because lanes are never inferred. |
-| out-of-band IP | `Device.spec.bmc.endpoint` | **Interim.** Fleet's design assigns out-of-band BMC addresses to Networking/IPAM; datum-cloud/fleet#132 tracks replacing this copied endpoint with a reference to an IPAM-issued address, and datum-cloud/fleet#130 tracks discovering hardware details from the BMC. Only for roles listed in `bmc.roleSlugs` and Devices with a chassis serial, never on an unidentified Device. The address comes from the `ipam/ip-addresses` record, read for its VRF: an address in a VRF the mapping does not list in `bmc.vrfIDs` is never treated as global. Written as `https://<IPv4>:443`, the literal form Fleet's Redfish executor accepts, with NetBox's prefix length dropped. IPv6, `0.0.0.0/8`, `240.0.0.0/4` (including `255.255.255.255`), loopback, link-local and multicast addresses write no BMC, and the Device is still created with the reason in its plan message. A Device whose endpoint matches another Device's, planned or existing from any writer, is `Quarantined/BMCEndpointCollision`, naming both. A switch's or PDU's management address is not a BMC, so roles are listed explicitly. |
+| out-of-band IP | `Device.spec.bmc.endpoint` | **Interim.** Fleet's design assigns out-of-band BMC addresses to Networking/IPAM; datum-cloud/fleet#132 tracks replacing this copied endpoint with a reference to an IPAM-issued address, and datum-cloud/fleet#130 tracks discovering hardware details from the BMC. Only for roles listed in `bmc.roleSlugs` and Devices with a chassis serial, never on an unidentified Device. The address comes from the `ipam/ip-addresses` record, read for its VRF: an address in a VRF the mapping does not list in `bmc.vrfIDs` is never treated as global. Written as `https://<IPv4>:443`, the literal form Fleet's Redfish executor accepts, with NetBox's prefix length dropped. IPv6, `0.0.0.0/8`, `240.0.0.0/4` (including `255.255.255.255`), loopback, link-local and multicast addresses write no BMC, and the Device is still created with the reason in its plan message. A Device whose endpoint matches another Device's, planned or existing from any writer, is `Quarantined/BMCEndpointCollision`, naming both. Endpoints are compared by host and port, with the scheme's default port filled in, IP literals canonicalized (including IPv4-mapped IPv6) and the path ignored. A hostname endpoint on another writer's Device is compared only with the same hostname, never resolved: the planner is a pure function, DNS answers vary between resolvers and over time, and a lookup would make the plan neither reproducible nor authoritative. Quarantining every Device whenever any other writer recorded a hostname would block the namespace's BMC imports on records unrelated to them. This controller itself writes only IP literals. A switch's or PDU's management address is not a BMC, so roles are listed explicitly. |
 | device type | `identity.model`, `manufacturer`, `modelShape` | A device without a model is `Unresolved`; Fleet requires one. |
 | serial | depends on `serialMeaning` | `Chassis` with a value: `identity.serial` and `expectedIdentity.serial`. `Unknown`, or `Chassis` with an empty serial: no serial is written, and the Device carries Fleet's `identity.unidentified: true` with a fixed reason. `ProviderHostID`: the DeviceClaim is created and the Device is `Unresolved/IdentityUnavailable`. Identity is never invented. |
 | record identity | labels `netbox.miloapis.com/{source,type,id}` | Correlation is this controller's metadata, not a Fleet field. See [how it uses Fleet](fleet-contract.md#correlation-is-this-controllers-metadata). |
@@ -206,12 +206,12 @@ fields.
 
 | Existing record | Outcome |
 | --- | --- |
-| None | `Create`: the first apply creates it. If another manager turns out to have created the name between observation and apply, the record is quarantined as `NameConflict`, never treated as this controller's. |
+| None | `Create`: the first apply creates it. Server-side apply has no create-only precondition, so if another writer creates the name between observation and apply, the apply merges into that record. The controller detects this from the other manager in the response, immediately applies an empty configuration preconditioned on that record's UID, which removes every field only it owned (its labels, annotations and any spec field the other writer did not set), and quarantines it as `NameConflict`. Fields the other writer set identically stay theirs. If that release fails, the outcome is `Unknown`. A conflicting field fails the apply before anything is written. |
 | Same name without this source's labels | `Quarantined/NameConflict`; never written. |
 | This source's labels, but not applied by `netbox-provider` | `Quarantined/NotApplyOwned`; never adopted. |
 | Applied by `netbox-provider`, and an immutable field would change | `Quarantined/ImmutableChanged`; no call is made. A Device's `identity` and `claimRef`, and a claim's `placement` and `lifecycle`, are immutable in Fleet; for example, "hardware identity changed in NetBox; ... a hardware swap is a new Device". A record is never deleted and recreated. Other rejections Fleet makes are quarantined with its message. |
 | Applied by `netbox-provider`, last applied digest and values equal | `Unchanged`; nothing is sent. |
-| Applied by `netbox-provider`, otherwise | `Update`: the plan is re-applied, preconditioned on the observed UID. A field another manager now owns is an apply conflict: `Quarantined/ApplyConflict`, naming the manager and field paths. |
+| Applied by `netbox-provider`, otherwise | `Update`: the plan is re-applied, preconditioned on the observed UID. A record deleted or replaced since observation fails that precondition, nothing is written, and the outcome is `Unknown` until the next observation. A field another manager now owns is an apply conflict: `Quarantined/ApplyConflict`, naming the manager and field paths. |
 
 A claim and its Device move together: if either is blocked, the other is not
 written either.
@@ -235,7 +235,9 @@ applied gains what later versions map:
   components are then created.
 - Turning on `bmc` for a mapping whose Devices already exist, or fixing an
   address later, updates those Devices' `spec.bmc`, which Fleet does not keep
-  immutable.
+  immutable. This applies only to Devices `netbox-provider` applied: a Device
+  another writer applied stays `Quarantined/NotApplyOwned` and never gets a
+  BMC endpoint from this controller.
 - Records written before writes were server-side applies (by `Create`) are not
   owned by `netbox-provider`, and stay `Quarantined/NotApplyOwned` until an
   operator removes them or transfers their ownership.
@@ -367,8 +369,9 @@ Generated with the template's `hack/rename.sh --service-name netbox-provider
   several projects.
 - The controller's Milo identity is bound to a role with `get` and `list` on
   the physical kinds and `create` and `patch` on the kinds it writes, scoped to
-  the provider project. Fleet's `fleet.datumapis.com-inventory-importer` role
-  grants only `create`; see [the importer role](fleet-contract.md#the-importer-role).
+  the provider project: Fleet's `fleet.datumapis.com-inventory-importer` role,
+  which grants `create` and `patch` since datum-cloud/fleet#134; see
+  [the importer role](fleet-contract.md#the-importer-role).
 
 ## Open questions
 

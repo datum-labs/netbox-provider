@@ -501,3 +501,47 @@ func TestTurningOnOrFixingABMCUpdatesOwnedDevices(t *testing.T) {
 		t.Fatalf("fixing the endpoint: %+v", server)
 	}
 }
+
+func TestEndpointKey(t *testing.T) {
+	ip := "192.0.2.10:443"
+	for endpoint, want := range map[string]string{
+		"https://192.0.2.10:443":             ip,
+		"https://192.0.2.10":                 ip,
+		"HTTPS://192.0.2.10/redfish/v1":      ip,
+		"https://[::ffff:192.0.2.10]:443":    ip,
+		"http://192.0.2.10":                  "192.0.2.10:80",
+		"https://192.0.2.10:8443":            "192.0.2.10:8443",
+		"https://[2001:DB8::1]":              "[2001:db8::1]:443",
+		"https://BMC.Example.Invalid.":       "host bmc.example.invalid:443",
+		"https://bmc.example.invalid:443/x/": "host bmc.example.invalid:443",
+		"ftp://192.0.2.10":                   "",
+		"not a url":                          "",
+	} {
+		got, ok := plan.EndpointKey(endpoint)
+		if got != want || ok != (want != "") {
+			t.Errorf("%q: key %q ok %v, want %q", endpoint, got, ok, want)
+		}
+	}
+}
+
+func TestBMCCollisionsCompareNormalizedEndpoints(t *testing.T) {
+	existing := func(endpoint string) unstructured.Unstructured {
+		return object(fleet.KindDevice, "operator-recorded", map[string]any{
+			"claimRef": map[string]any{"name": "operator-slot"}, "identity": map[string]any{"model": "x", "serial": "OTHER"},
+			"bmc": map[string]any{"endpoint": endpoint},
+		}, nil)
+	}
+	for endpoint, collides := range map[string]bool{
+		"https://192.0.2.10":                     true,
+		"HTTPS://192.0.2.10/redfish/v1":          true,
+		"https://[::ffff:192.0.2.10]:443":        true,
+		"https://192.0.2.10:8443":                false,
+		"https://192.0.2.11":                     false,
+		"https://bmc-of-the-same-server.example": false,
+	} {
+		c := candidate(t, plan.Build(withExisting(input(t), existing(endpoint))), fleet.KindDevice, "dcim/devices/1000")
+		if got := c.Reason == plan.ReasonBMCCollision; got != collides {
+			t.Errorf("%q: collision %v, want %v (%+v)", endpoint, got, collides, c)
+		}
+	}
+}

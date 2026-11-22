@@ -93,6 +93,9 @@ func newSource(namespace, url string, mode netboxv1alpha1.SourceMode) *netboxv1a
 type writeRecorder struct {
 	mu      sync.Mutex
 	applies []string
+	// beforeApply, when set, runs before each apply reaches the API server,
+	// to simulate another writer acting between plan and apply.
+	beforeApply func(kind, name string)
 }
 
 // Applies returns Kind/name for every apply, in order.
@@ -135,7 +138,11 @@ func recordingFleetClient(rec *writeRecorder) client.Client {
 			}
 			rec.mu.Lock()
 			rec.applies = append(rec.applies, meta.Kind+"/"+meta.Metadata.Name)
+			hook := rec.beforeApply
 			rec.mu.Unlock()
+			if hook != nil {
+				hook(meta.Kind, meta.Metadata.Name)
+			}
 			return c.Apply(ctx, obj, opts...)
 		},
 		Create: func(context.Context, client.WithWatch, client.Object, ...client.CreateOption) error {

@@ -12,8 +12,9 @@ Fleet does not know this controller or NetBox exists. Fleet sees ordinary
 inventory records holding only physical facts; this controller correlates them
 with NetBox through its own `netbox.miloapis.com/*` labels and annotations. It
 targets Fleet's inventory schema without authorship fields (datum-cloud/fleet#106)
-and, for writes, `create` and `patch` on the inventory kinds (Fleet's importer
-role, #101, grants only `create`; see [Fleet usage](docs/architecture/fleet-contract.md)).
+and, for writes, `create` and `patch` on the inventory kinds, which Fleet's
+importer role grants (#101, with `patch` added by #134; see
+[Fleet usage](docs/architecture/fleet-contract.md)).
 
 Generated from [`milo-os/controller-template`](https://github.com/milo-os/controller-template)
 (kubebuilder v4). Tested against a synthetic NetBox and Fleet's vendored CRD

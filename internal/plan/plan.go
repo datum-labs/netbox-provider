@@ -685,8 +685,15 @@ func (b *builder) collisions() {
 		if a.c == nil || (a.c.Action != ActionCreate && a.c.Action != ActionUpdate) || a.spec.BMC == nil {
 			continue
 		}
+		key, ok := endpointKey(a.spec.BMC.Endpoint)
+		if !ok {
+			continue
+		}
 		for j, o := range all {
-			if i == j || o.spec.BMC == nil || o.spec.BMC.Endpoint != a.spec.BMC.Endpoint || o.name == a.name {
+			if i == j || o.spec.BMC == nil || o.name == a.name {
+				continue
+			}
+			if other, ok := endpointKey(o.spec.BMC.Endpoint); !ok || other != key {
 				continue
 			}
 			a.c.Action, a.c.Reason = ActionQuarantined, ReasonBMCCollision
