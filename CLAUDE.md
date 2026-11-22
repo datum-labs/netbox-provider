@@ -11,7 +11,8 @@ generated from `milo-os/controller-template` (kubebuilder v4). Read
 - **Deployment**: `config/` follows Fleet's layout and RBAC split. RBAC is
   hand-written and namespaced; do not add kubebuilder RBAC markers.
 - **Two API servers**: the manager's own (`kubeconfigPath`) stores this
-  controller's kinds and token Secrets; Fleet records are read and created on
+  controller's kinds and token Secrets; Fleet records are read, and written by
+  server-side apply as field manager `netbox-provider`, on
   `fleet.kubeconfigPath`, normally the Milo provider project control plane.
 - **Fleet as unstructured**: `internal/fleet` mirrors only the written fields;
   `test/fleet/crds` vendors Fleet's CRD for envtest.

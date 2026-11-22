@@ -109,10 +109,18 @@ type Device struct {
 	OOBIP *IPAddressRef `json:"oob_ip,omitempty"`
 }
 
-// IPAddressRef is a nested ipam/ip-addresses reference. Only the address,
-// in CIDR notation, is retained.
+// IPAddressRef is a nested ipam/ip-addresses reference. NetBox's nested form
+// carries no VRF, so the full record is read from ipam/ip-addresses.
 type IPAddressRef struct {
+	ID      int64  `json:"id,omitempty"`
 	Address string `json:"address,omitempty"`
+}
+
+// IPAddress is an ipam/ip-addresses record. VRF is nil in the global table.
+type IPAddress struct {
+	ID      int64  `json:"id"`
+	Address string `json:"address,omitempty"`
+	VRF     *Ref   `json:"vrf,omitempty"`
 }
 
 // UnmarshalJSON accepts both role field names and null strings.
@@ -159,6 +167,8 @@ type Snapshot struct {
 	Cables      []Cable                `json:"cables"`
 	PowerPanels []PowerPanel           `json:"powerPanels"`
 	PowerFeeds  []PowerFeed            `json:"powerFeeds"`
+	// IPAddresses are the devices' out-of-band IP records.
+	IPAddresses []IPAddress `json:"ipAddresses"`
 }
 
 // Digest is the sha256 of the canonical JSON of the retained fields.
@@ -179,6 +189,7 @@ func (s *Snapshot) Counts() map[string]int32 {
 		CollectionCables:      int32(len(s.Cables)),
 		CollectionPowerPanels: int32(len(s.PowerPanels)),
 		CollectionPowerFeeds:  int32(len(s.PowerFeeds)),
+		CollectionIPAddresses: int32(len(s.IPAddresses)),
 	}
 	for _, collection := range ComponentCollections {
 		counts[collection] = int32(len(s.Components[collection]))
@@ -265,8 +276,29 @@ func (c *Client) Snapshot(ctx context.Context, scope Scope, now time.Time) (*Sna
 			return nil, fmt.Errorf("%s: %w", step.collection, err)
 		}
 	}
+	// Out-of-band IP records are read by ID, a bounded number per request.
+	var ids []string
+	for _, d := range snapshot.Devices {
+		if d.OOBIP != nil && d.OOBIP.ID > 0 {
+			ids = append(ids, strconv.FormatInt(d.OOBIP.ID, 10))
+		}
+	}
+	for start := 0; start < len(ids); start += ipAddressBatch {
+		raw, err := c.List(ctx, CollectionIPAddresses, url.Values{"id": ids[start:min(start+ipAddressBatch, len(ids))]})
+		if err != nil {
+			return nil, err
+		}
+		batch, err := decodeAll[IPAddress](raw)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", CollectionIPAddresses, err)
+		}
+		snapshot.IPAddresses = append(snapshot.IPAddresses, batch...)
+	}
 	return snapshot, nil
 }
+
+// ipAddressBatch bounds the IDs in one ipam/ip-addresses request.
+const ipAddressBatch = 100
 
 func decodeAll[T any](raw []json.RawMessage) ([]T, error) {
 	out := make([]T, 0, len(raw))

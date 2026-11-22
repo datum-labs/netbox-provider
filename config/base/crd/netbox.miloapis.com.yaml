@@ -67,6 +67,18 @@ spec:
                     minItems: 1
                     type: array
                     x-kubernetes-list-type: set
+                  vrfIDs:
+                    description: |-
+                      VRFIDs are NetBox VRFs whose out-of-band IPs may be used. An address in
+                      the global table (no VRF) is always usable; an address in any other VRF
+                      is never treated as global, and writes no BMC.
+                    items:
+                      format: int64
+                      minimum: 1
+                      type: integer
+                    maxItems: 64
+                    type: array
+                    x-kubernetes-list-type: set
                 required:
                 - roleSlugs
                 type: object
@@ -344,6 +356,37 @@ spec:
                 - Observe
                 - Create
                 type: string
+              readLimits:
+                description: |-
+                  ReadLimits bound each NetBox collection read. Unset fields keep their
+                  defaults.
+                properties:
+                  collectionTimeout:
+                    description: |-
+                      CollectionTimeout bounds the read of one collection. Each request is
+                      also bounded at 30 seconds. Default 2m.
+                    type: string
+                    x-kubernetes-validations:
+                    - message: collectionTimeout must be between 10s and 30m
+                      rule: duration(self) >= duration('10s') && duration(self) <=
+                        duration('30m')
+                  maxMiBPerCollection:
+                    description: |-
+                      MaxMiBPerCollection bounds the response bytes of one collection, in
+                      MiB. Each page is still bounded at 4 MiB. Default 64.
+                    format: int32
+                    maximum: 4096
+                    minimum: 1
+                    type: integer
+                  maxRecordsPerCollection:
+                    description: |-
+                      MaxRecordsPerCollection bounds the records in one collection. The page
+                      bound scales with it at 200 records per page. Default 20000.
+                    format: int32
+                    maximum: 1000000
+                    minimum: 1
+                    type: integer
+                type: object
               scope:
                 description: Scope narrows what is read from NetBox.
                 properties:
@@ -563,6 +606,12 @@ spec:
                   unsupported:
                     format: int32
                     type: integer
+                  update:
+                    format: int32
+                    type: integer
+                  updated:
+                    format: int32
+                    type: integer
                 required:
                 - create
                 - created
@@ -572,6 +621,8 @@ spec:
                 - unchanged
                 - unresolved
                 - unsupported
+                - update
+                - updated
                 type: object
               records:
                 description: Records lists notable records, conflicts first. It is
@@ -595,6 +646,8 @@ spec:
                       enum:
                       - Create
                       - Created
+                      - Update
+                      - Updated
                       - Unchanged
                       - Quarantined
                       - Unresolved

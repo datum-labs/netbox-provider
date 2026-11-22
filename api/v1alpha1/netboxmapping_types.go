@@ -160,6 +160,16 @@ type BMCMapping struct {
 	// +kubebuilder:validation:items:MaxLength=100
 	// +listType=set
 	RoleSlugs []string `json:"roleSlugs"`
+
+	// VRFIDs are NetBox VRFs whose out-of-band IPs may be used. An address in
+	// the global table (no VRF) is always usable; an address in any other VRF
+	// is never treated as global, and writes no BMC.
+	//
+	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:items:Minimum=1
+	// +listType=set
+	// +optional
+	VRFIDs []int64 `json:"vrfIDs,omitempty"`
 }
 
 // NetBoxMappingSpec is the reviewed interpretation of a NetBox source.

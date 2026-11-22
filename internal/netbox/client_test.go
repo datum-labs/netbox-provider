@@ -317,6 +317,9 @@ func TestSnapshotAllowlistsFieldsAndIsStable(t *testing.T) {
 		front.RearPorts[1].RearPort == nil || *front.RearPorts[1].RearPort != 2100 || *front.RearPorts[1].Position != 2 {
 		t.Errorf("front port rear mappings decoded as %+v", front.RearPorts)
 	}
+	if counts[netbox.CollectionIPAddresses] != 3 || first.IPAddresses[0].ID != 9000 || first.IPAddresses[0].VRF != nil {
+		t.Errorf("out-of-band IP records %+v", first.IPAddresses)
+	}
 	cable := first.Cables[0]
 	if cable.Type != "dac-passive" || netbox.ChoiceValue(cable.Status) != "connected" || len(cable.ATerminations) != 1 ||
 		cable.ATerminations[0] != (netbox.Termination{ObjectType: "dcim.interface", ObjectID: 2001}) {
@@ -370,5 +373,25 @@ func TestSnapshotFailsWhollyOnAnyCollectionError(t *testing.T) {
 	snapshot, err := newClient(t, server.Server, server.RootURL(), netbox.Limits{}).Snapshot(context.Background(), netbox.Scope{}, time.Now())
 	if err == nil || snapshot != nil || strings.Contains(err.Error(), "sensitive") {
 		t.Fatalf("snapshot=%v err=%v", snapshot, err)
+	}
+}
+
+func TestCollectionTimeoutBoundsEachCollection(t *testing.T) {
+	server := newTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(300 * time.Millisecond)
+		_, _ = fmt.Fprint(w, `{"count":1,"next":null,"results":[{"id":1}]}`)
+	}))
+	defer server.Close()
+	limits := netbox.DefaultLimits
+	limits.CollectionTimeout = 100 * time.Millisecond
+	if _, err := newClient(t, server, server.URL, limits).List(context.Background(), netbox.CollectionDevices, nil); err == nil {
+		t.Fatal("a collection read outlived its timeout")
+	}
+	limits.CollectionTimeout = 5 * time.Second
+	if records, err := newClient(t, server, server.URL, limits).List(context.Background(), netbox.CollectionDevices, nil); err != nil || len(records) != 1 {
+		t.Fatalf("records %d err %v", len(records), err)
+	}
+	if netbox.PagesFor(20000) != netbox.DefaultLimits.Pages || netbox.PagesFor(1000000) != 5001 {
+		t.Fatalf("pages %d %d", netbox.PagesFor(20000), netbox.PagesFor(1000000))
 	}
 }

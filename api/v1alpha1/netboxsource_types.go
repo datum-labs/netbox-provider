@@ -7,6 +7,33 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
+// ReadLimits bound one NetBox collection read, such as dcim/interfaces. A read
+// that exceeds a bound fails as a whole, and nothing is planned from it.
+type ReadLimits struct {
+	// MaxRecordsPerCollection bounds the records in one collection. The page
+	// bound scales with it at 200 records per page. Default 20000.
+	//
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=1000000
+	// +optional
+	MaxRecordsPerCollection int32 `json:"maxRecordsPerCollection,omitempty"`
+
+	// MaxMiBPerCollection bounds the response bytes of one collection, in
+	// MiB. Each page is still bounded at 4 MiB. Default 64.
+	//
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=4096
+	// +optional
+	MaxMiBPerCollection int32 `json:"maxMiBPerCollection,omitempty"`
+
+	// CollectionTimeout bounds the read of one collection. Each request is
+	// also bounded at 30 seconds. Default 2m.
+	//
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('10s') && duration(self) <= duration('30m')",message="collectionTimeout must be between 10s and 30m"
+	// +optional
+	CollectionTimeout *metav1.Duration `json:"collectionTimeout,omitempty"`
+}
+
 // SourceMode selects whether the controller may write to Fleet.
 // +kubebuilder:validation:Enum=Observe;Create
 type SourceMode string
@@ -16,8 +43,11 @@ const (
 	// writes Fleet records. This is the default.
 	SourceModeObserve SourceMode = "Observe"
 
-	// SourceModeCreate additionally creates planned records that do not exist
-	// yet. It never updates, patches, adopts, or deletes an existing record.
+	// SourceModeCreate additionally writes the plan to Fleet by server-side
+	// apply with field manager netbox-provider: it creates missing records and
+	// re-applies the fields it owns when NetBox changes them. It never forces
+	// ownership, adopts a record it did not apply, changes an immutable field,
+	// writes status, or deletes a record.
 	SourceModeCreate SourceMode = "Create"
 )
 
@@ -144,6 +174,12 @@ type NetBoxSourceSpec struct {
 	// +optional
 	Mode SourceMode `json:"mode,omitempty"`
 
+	// ReadLimits bound each NetBox collection read. Unset fields keep their
+	// defaults.
+	//
+	// +optional
+	ReadLimits *ReadLimits `json:"readLimits,omitempty"`
+
 	// Interval between complete re-reads of NetBox.
 	//
 	// +kubebuilder:default="30m"
@@ -158,7 +194,7 @@ type NetBoxSourceSpec struct {
 }
 
 // RecordState is the outcome planned for one source record or Fleet target.
-// +kubebuilder:validation:Enum=Create;Created;Unchanged;Quarantined;Unresolved;Excluded;Unsupported;RetainedMissingSource
+// +kubebuilder:validation:Enum=Create;Created;Update;Updated;Unchanged;Quarantined;Unresolved;Excluded;Unsupported;RetainedMissingSource
 type RecordState string
 
 const (
@@ -167,6 +203,11 @@ const (
 	RecordStateCreate RecordState = "Create"
 	// RecordStateCreated means the record was created in this reconcile.
 	RecordStateCreated RecordState = "Created"
+	// RecordStateUpdate means a field this controller owns differs from
+	// NetBox and would be re-applied (Observe mode) or is being re-applied.
+	RecordStateUpdate RecordState = "Update"
+	// RecordStateUpdated means owned fields were re-applied in this reconcile.
+	RecordStateUpdated RecordState = "Updated"
 	// RecordStateUnchanged means an equal record from this source exists.
 	RecordStateUnchanged RecordState = "Unchanged"
 	// RecordStateQuarantined means a conflict with existing Fleet state blocks
@@ -219,6 +260,8 @@ type ObservationSummary struct {
 type PlanSummary struct {
 	Create                int32 `json:"create"`
 	Created               int32 `json:"created"`
+	Update                int32 `json:"update"`
+	Updated               int32 `json:"updated"`
 	Unchanged             int32 `json:"unchanged"`
 	Quarantined           int32 `json:"quarantined"`
 	Unresolved            int32 `json:"unresolved"`

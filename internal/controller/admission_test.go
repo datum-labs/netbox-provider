@@ -5,8 +5,10 @@ package controller
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -47,7 +49,7 @@ var _ = Describe("Fleet admission of generated records", func() {
 		for _, kind := range fleet.WriteKinds {
 			for _, c := range p.Candidates {
 				if c.Kind == kind && c.Action == plan.ActionCreate {
-					Expect(k8sClient.Create(ctx, c.Object.DeepCopy())).To(Succeed(), c.Key())
+					Expect(k8sClient.Apply(ctx, client.ApplyConfigurationFromUnstructured(c.Object.DeepCopy()), client.FieldOwner(plan.FieldManager))).To(Succeed(), c.Key())
 					kinds[kind] = true
 				}
 			}
@@ -62,6 +64,7 @@ var _ = Describe("Fleet admission of generated records", func() {
 			Expect(stored.Object["spec"]).NotTo(HaveKey("provenance"), c.Key())
 			Expect(stored.Object["spec"]).NotTo(HaveKey("reportedPlacement"), c.Key())
 			Expect(stored.GetLabels()).To(HaveKeyWithValue(plan.LabelSource, testSystem))
+			Expect(ownedFields(stored, plan.FieldManager)).To(Equal(appliedFields(c.Object)), c.Key()+": netbox-provider owns exactly the applied fields")
 		}
 		Expect(kinds).To(Equal(map[string]bool{fleet.KindRack: true, fleet.KindPowerFeed: true, fleet.KindDeviceClaim: true, fleet.KindDevice: true, fleet.KindCable: true}))
 		withBMC := 0
@@ -232,6 +235,52 @@ var _ = Describe("netbox.miloapis.com admission", func() {
 		Entry("missing revision", func(m *netboxv1alpha1.NetBoxMappingSpec) { m.Revision = "" }, "revision"),
 	)
 })
+
+// ownedFields returns the top-level spec fields, labels and annotations a
+// manager owns by server-side apply.
+func ownedFields(obj *unstructured.Unstructured, manager string) map[string][]string {
+	for _, entry := range obj.GetManagedFields() {
+		if entry.Manager != manager || entry.Operation != metav1.ManagedFieldsOperationApply || entry.FieldsV1 == nil {
+			continue
+		}
+		var fields map[string]map[string]any
+		Expect(json.Unmarshal(entry.FieldsV1.GetRawBytes(), &fields)).To(Succeed())
+		keys := func(m map[string]any) []string {
+			var out []string
+			for k := range m {
+				if k != "." {
+					out = append(out, strings.TrimPrefix(k, "f:"))
+				}
+			}
+			sort.Strings(out)
+			return out
+		}
+		meta := fields["f:metadata"]
+		labels, _ := meta["f:labels"].(map[string]any)
+		annotations, _ := meta["f:annotations"].(map[string]any)
+		return map[string][]string{"spec": keys(fields["f:spec"]), "labels": keys(labels), "annotations": keys(annotations)}
+	}
+	return nil
+}
+
+// appliedFields returns the same keys from an applied configuration.
+func appliedFields(obj *unstructured.Unstructured) map[string][]string {
+	keys := func(m map[string]string) []string {
+		var out []string
+		for k := range m {
+			out = append(out, k)
+		}
+		sort.Strings(out)
+		return out
+	}
+	spec, _ := obj.Object["spec"].(map[string]any)
+	var specKeys []string
+	for k := range spec {
+		specKeys = append(specKeys, k)
+	}
+	sort.Strings(specKeys)
+	return map[string][]string{"spec": specKeys, "labels": keys(obj.GetLabels()), "annotations": keys(obj.GetAnnotations())}
+}
 
 func clientKey(namespace, name string) client.ObjectKey {
 	return client.ObjectKey{Namespace: namespace, Name: name}

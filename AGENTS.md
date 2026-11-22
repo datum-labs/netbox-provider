@@ -21,9 +21,13 @@ holds the template's controller conventions.
 - Do not import Fleet's `internal` packages or invent a Fleet module path. Use
   unstructured objects, the `internal/fleet` mirror, and the vendored CRD in
   `test/fleet`. Re-vendor verbatim and update its recorded commit and sha256.
-- Writes are additive. The reconciler may only `Create` Fleet records. Never
-  update, patch, adopt, or delete one, never take over records another writer
-  owns (such as Flux), and never touch `MachineCapacity` or `deviceRef`.
+- Every Fleet write is a server-side apply as field manager `netbox-provider`,
+  carrying only the spec fields mapped from NetBox and this controller's
+  labels and annotations. Never force ownership, never apply to a record this
+  controller did not apply before (such as one Flux owns), never send status,
+  never use a non-apply patch, update or delete, and never touch
+  `MachineCapacity` or `deviceRef`. A change to a field Fleet keeps immutable
+  is quarantined, never worked around by deleting and recreating.
 - `Observe` stays the default. Writing needs the explicit `mode: Create` opt-in.
 - Quarantine conflicts and identity collisions in status instead of
   overwriting. Records missing from NetBox are retained and reported, never

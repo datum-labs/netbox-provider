@@ -19,7 +19,7 @@ root, and Fleet stays its owner.
 There is no `config/milo` root. This controller's kinds are configuration for
 one deployment, not project resources, so they are not registered in Milo and
 have no ProtectedResources. The Milo IAM the controller needs is Fleet's
-[create-only importer role](../docs/architecture/fleet-contract.md#the-one-fleet-dependency-the-importer-role),
+[importer role](../docs/architecture/fleet-contract.md#the-importer-role), extended with `patch` for server-side apply,
 which ships in Fleet's own `config/milo`.
 
 `config/standalone` must not be referenced by the production root. It points a
@@ -93,11 +93,14 @@ environment and must not be added to this repository.
 
 ### Role bindings
 
-Bind the controller's Milo identity, in its one provider project, to Fleet's
-create-only `fleet.datumapis.com-inventory-importer` role (datum-cloud/fleet#101).
-It reads every physical kind and creates new records; it cannot update, patch
-or delete them. Do not substitute `fleet.datumapis.com-inventory-manager`,
-which also grants `update` and `patch`. Binding the role is the environment's
+Bind the controller's Milo identity, in its one provider project, to a role
+with `get` and `list` on the physical kinds and `create` and `patch` on Rack,
+PowerFeed, DeviceClaim, Device and Cable. Server-side apply needs both: `create`
+for a record's first apply and `patch` for later ones. Fleet's
+`fleet.datumapis.com-inventory-importer` role (datum-cloud/fleet#101) grants
+`create` only, so it is not enough on its own; see
+[Fleet usage](../docs/architecture/fleet-contract.md#the-importer-role). No
+`update` or `delete` is needed. Binding the role is the environment's
 ownership opt-in; each NetBoxSource's `mode: Create` is the second, per-source
 opt-in.
 
