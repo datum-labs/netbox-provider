@@ -59,9 +59,11 @@ NetBoxMappings described in [config/README.md](config/README.md). Fleet records
 are written through Milo IAM in the provider project, never local RBAC.
 
 Records carry only physical facts; the link to NetBox is in this controller's
-labels and annotations. A Device is created only when its NetBox serial is a
-reviewed chassis serial; otherwise its DeviceClaim is created and the Device is
-reported Unresolved.
+labels and annotations. A Device records its NetBox serial only when the
+mapping says it is a chassis serial. Otherwise it is recorded with Fleet's
+unidentified marker (datum-cloud/fleet#110), so it can be cabled but never
+enrolled as capacity. A provider-hosted server, whose serial is a provider host
+ID, gets only its DeviceClaim.
 
 Review a source's plan in Observe mode first; use a dedicated NetBox account
 with a read-only token. When the plan is what you expect, opt in:

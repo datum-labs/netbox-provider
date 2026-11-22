@@ -304,7 +304,7 @@ func TestSnapshotAllowlistsFieldsAndIsStable(t *testing.T) {
 	}
 	counts := first.Counts()
 	if counts[netbox.CollectionDevices] != 9 || counts[netbox.CollectionRacks] != 2 || counts[netbox.CollectionDeviceTypes] != 5 ||
-		counts[netbox.CollectionInterfaces] != 9 || counts[netbox.CollectionPowerOutlets] != 2 || counts[netbox.CollectionCables] != 8 ||
+		counts[netbox.CollectionInterfaces] != 11 || counts[netbox.CollectionPowerOutlets] != 2 || counts[netbox.CollectionCables] != 9 ||
 		counts[netbox.CollectionPowerFeeds] != 3 || counts[netbox.CollectionPowerPanels] != 1 || counts[netbox.CollectionRearPorts] != 0 {
 		t.Fatalf("counts %v", counts)
 	}

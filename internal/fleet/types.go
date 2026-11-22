@@ -115,6 +115,12 @@ type DeviceIdentity struct {
 	Model        string `json:"model"`
 	Serial       string `json:"serial,omitempty"`
 	SystemUUID   string `json:"systemUUID,omitempty"`
+	// Unidentified records that the Device has no recorded hardware
+	// identity. It is only ever true, never set with a serial or system
+	// UUID, and always set with UnidentifiedReason. Such a Device can be
+	// cabled but never enrolled as capacity.
+	Unidentified       bool   `json:"unidentified,omitempty"`
+	UnidentifiedReason string `json:"unidentifiedReason,omitempty"`
 }
 
 // DeviceSpec is the written subset of Device.spec.

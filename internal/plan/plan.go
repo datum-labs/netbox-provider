@@ -49,6 +49,13 @@ const (
 	ReasonIdentityUnavailable   = "IdentityUnavailable"
 )
 
+// Fixed reasons written with Fleet's unidentified-device marker. They describe
+// the source's evidence and never name a host.
+const (
+	UnidentifiedNoSerial         = "no serial recorded in the inventory source"
+	UnidentifiedSerialUnreviewed = "the inventory source's serial is not a reviewed chassis serial"
+)
+
 // Source record types: the NetBox collection paths, used in this
 // controller's correlation labels.
 const (
@@ -413,16 +420,24 @@ func (b *builder) device(source string, device netbox.Device, m netboxv1alpha1.D
 		Placement:        placement,
 	}
 	claimCandidate := b.add(fleet.KindDeviceClaim, source, claim, ref, deps...)
-	// Fleet requires a serial or system UUID for a manually recorded Device.
-	// Without a reviewed chassis serial the installation plan is still
-	// recorded, and registration is deferred; identity is never invented.
+	// A Device needs a serial, a system UUID, or Fleet's explicit marker
+	// that no hardware identity is recorded. Identity is never invented: a
+	// device without a reviewed chassis serial is recorded as unidentified,
+	// so it can be cabled, but it can never be enrolled as capacity. A
+	// provider host ID is a provider's record, not missing identity, so that
+	// Device is deferred until a chassis serial or system UUID is known.
 	if identity.Serial == "" {
-		message := "no reviewed chassis serial or system UUID; the DeviceClaim is planned and the Device is not created"
 		if m.SerialMeaning == netboxv1alpha1.SerialMeaningProviderHostID {
-			message = "the serial is a provider host ID, not a chassis serial; the DeviceClaim is planned and the Device is not created"
+			b.record(source, netboxv1alpha1.RecordStateUnresolved, ReasonIdentityUnavailable,
+				"the serial is a provider host ID, not a chassis serial; the DeviceClaim is planned and the Device is not created")
+			return
 		}
-		b.record(source, netboxv1alpha1.RecordStateUnresolved, ReasonIdentityUnavailable, message)
-		return
+		identity.Unidentified = true
+		identity.UnidentifiedReason = UnidentifiedNoSerial
+		if m.SerialMeaning == netboxv1alpha1.SerialMeaningUnknown && device.Serial != "" {
+			identity.UnidentifiedReason = UnidentifiedSerialUnreviewed
+		}
+		spec.Identity = identity
 	}
 	if parts := b.parts[device.ID]; parts != nil {
 		if parts.problem != "" {

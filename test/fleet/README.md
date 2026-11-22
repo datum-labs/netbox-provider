@@ -8,10 +8,10 @@ the owner of the schema.
 | Field | Value |
 | --- | --- |
 | Source repository | `datum-cloud/fleet` |
-| Source | datum-cloud/fleet#106 (merged), the target inventory schema |
-| Branch head when vendored | `5b60656759033b61674ee202a9ad94f4d49f4a64` (`feat/manual-inventory-records`) |
-| Last commit touching the file | `11778ec901812747ad7cb5e915f6c7658836bc04` |
-| sha256 | `21c081b63e8efb37d71d19a66616a972413b836ace24427de5d2b947f5ebbe9e` |
+| Source | datum-cloud/fleet#110 (open), adding the unidentified-device marker on top of the #106 schema |
+| Branch head when vendored | `5341785b90777d3c64eae1345ea94fedda1e35c8` (`feat/unidentified-device`) |
+| Last commit touching the file | `5341785b90777d3c64eae1345ea94fedda1e35c8` |
+| sha256 | `023ae431bfd9ff566fa511a64b7bdc247c1bd0a0d4ae912e014a07bf21848f45` |
 
 The envtest suite checks the sha256, so re-vendoring must update this table and
 `vendoredFleetCRDDigest` in `internal/controller/admission_test.go` together.

@@ -262,3 +262,28 @@ func TestPowerFeedAndCableSpecs(t *testing.T) {
 		t.Error("a cable label is its display name")
 	}
 }
+
+func TestCablesToUnidentifiedDevicesAreCreatable(t *testing.T) {
+	p := plan.Build(input(t))
+	unidentified := candidate(t, p, fleet.KindDevice, "dcim/devices/1002")
+	if field(t, unidentified, "identity", "unidentified") != true {
+		t.Fatalf("identity %v", field(t, unidentified, "identity"))
+	}
+	cable := candidate(t, p, fleet.KindCable, "dcim/cables/5008")
+	lane := field(t, cable, "lanes").([]any)[0].(map[string]any)
+	if cable.Action != plan.ActionCreate || lane["a"].(map[string]any)["deviceRef"].(map[string]any)["name"] != unidentified.Name ||
+		lane["a"].(map[string]any)["componentID"] != "interfaces-2020" {
+		t.Fatalf("cable %s %v", cable.Action, lane)
+	}
+	found := false
+	for _, dep := range cable.DependsOn {
+		found = found || dep == unidentified.Key()
+	}
+	if !found {
+		t.Fatalf("cable deps %v", cable.DependsOn)
+	}
+	// A provider-hosted server has no Device, so its cable stays unresolved.
+	if got := outcomes(p)["record dcim/cables/5003"]; got.reason != plan.ReasonEndpointUnavailable {
+		t.Fatalf("%+v", got)
+	}
+}
