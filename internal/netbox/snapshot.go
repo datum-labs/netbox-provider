@@ -105,6 +105,14 @@ type Device struct {
 	// rack face it is mounted on.
 	Position *Decimal `json:"position,omitempty"`
 	Face     *Choice  `json:"face,omitempty"`
+	// OOBIP is the device's out-of-band management address.
+	OOBIP *IPAddressRef `json:"oob_ip,omitempty"`
+}
+
+// IPAddressRef is a nested ipam/ip-addresses reference. Only the address,
+// in CIDR notation, is retained.
+type IPAddressRef struct {
+	Address string `json:"address,omitempty"`
 }
 
 // UnmarshalJSON accepts both role field names and null strings.

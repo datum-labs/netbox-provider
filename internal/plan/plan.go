@@ -140,6 +140,7 @@ type builder struct {
 	feedByID   map[int64]*Candidate
 	deviceByID map[int64]*Candidate
 	parts      map[int64]*deviceParts
+	bmcRoles   map[string]bool
 	components map[string]owned
 	logical    map[string]bool
 	premises   map[netboxv1alpha1.PremisesSourceType]map[int64]string
@@ -162,6 +163,12 @@ func Build(in Input) *Plan {
 	for i := range in.Existing[fleet.KindFacility] {
 		f := &in.Existing[fleet.KindFacility][i]
 		b.facilities[f.GetName()] = f
+	}
+	b.bmcRoles = map[string]bool{}
+	if in.Mapping.BMC != nil {
+		for _, slug := range in.Mapping.BMC.RoleSlugs {
+			b.bmcRoles[slug] = true
+		}
 	}
 	b.mapPremises()
 	b.racks()
@@ -448,7 +455,23 @@ func (b *builder) device(source string, device netbox.Device, m netboxv1alpha1.D
 		spec.Components = parts.components
 		spec.InternalMappings = parts.mappings
 	}
-	b.deviceByID[device.ID] = b.add(fleet.KindDevice, source, spec, ref, claimCandidate.Key())
+	note := ""
+	if device.Role != nil && b.bmcRoles[device.Role.Slug] {
+		endpoint, problem := bmcEndpoint(device)
+		switch {
+		case identity.Unidentified:
+			note = "no BMC endpoint: a Device without hardware identity cannot record one"
+		case problem != "":
+			note = "no BMC endpoint: " + problem
+		default:
+			spec.BMC = &fleet.BMC{Endpoint: endpoint}
+		}
+	}
+	c := b.add(fleet.KindDevice, source, spec, ref, claimCandidate.Key())
+	if note != "" && c.Action == ActionCreate {
+		c.Message = note
+	}
+	b.deviceByID[device.ID] = c
 }
 
 // reconcile compares candidates with existing records of the same name and

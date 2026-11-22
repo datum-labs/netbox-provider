@@ -148,6 +148,20 @@ type RoleExclusion struct {
 	Reason string `json:"reason"`
 }
 
+// BMCMapping records BMC endpoints from NetBox's out-of-band IPs.
+type BMCMapping struct {
+	// RoleSlugs are the NetBox device roles whose out-of-band IP is a
+	// Redfish BMC, such as servers. Other devices' out-of-band IPs, for
+	// example a switch's management address, are never written as a BMC.
+	//
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=100
+	// +listType=set
+	RoleSlugs []string `json:"roleSlugs"`
+}
+
 // NetBoxMappingSpec is the reviewed interpretation of a NetBox source.
 type NetBoxMappingSpec struct {
 	// Revision identifies the reviewed mapping content. It is written to
@@ -197,6 +211,14 @@ type NetBoxMappingSpec struct {
 	//
 	// +optional
 	UntypedCableMedium CableMedium `json:"untypedCableMedium,omitempty"`
+
+	// BMC writes Device.spec.bmc.endpoint as https://<IPv4>:443 from the
+	// device's NetBox out-of-band IP, for Devices with a chassis serial whose
+	// role is listed. A device without a usable IPv4 out-of-band IP gets no
+	// BMC; the Device is still created. Unset writes no BMC.
+	//
+	// +optional
+	BMC *BMCMapping `json:"bmc,omitempty"`
 }
 
 // NetBoxMapping holds reviewed import decisions for a NetBoxSource.

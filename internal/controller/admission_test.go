@@ -64,6 +64,16 @@ var _ = Describe("Fleet admission of generated records", func() {
 			Expect(stored.GetLabels()).To(HaveKeyWithValue(plan.LabelSource, testSystem))
 		}
 		Expect(kinds).To(Equal(map[string]bool{fleet.KindRack: true, fleet.KindPowerFeed: true, fleet.KindDeviceClaim: true, fleet.KindDevice: true, fleet.KindCable: true}))
+		withBMC := 0
+		for _, c := range p.Candidates {
+			if c.Kind == fleet.KindDevice {
+				if endpoint, ok, _ := unstructured.NestedString(c.Object.Object, "spec", "bmc", "endpoint"); ok {
+					Expect(endpoint).To(Equal("https://192.0.2.10:443"))
+					withBMC++
+				}
+			}
+		}
+		Expect(withBMC).To(Equal(1), "Fleet admits the BMC endpoint written from an out-of-band IP")
 		// A second create of the same name never overwrites.
 		for _, c := range p.Candidates {
 			err := k8sClient.Create(ctx, c.Object.DeepCopy())

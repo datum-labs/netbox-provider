@@ -47,6 +47,29 @@ spec:
             description: NetBoxMappingSpec is the reviewed interpretation of a NetBox
               source.
             properties:
+              bmc:
+                description: |-
+                  BMC writes Device.spec.bmc.endpoint as https://<IPv4>:443 from the
+                  device's NetBox out-of-band IP, for Devices with a chassis serial whose
+                  role is listed. A device without a usable IPv4 out-of-band IP gets no
+                  BMC; the Device is still created. Unset writes no BMC.
+                properties:
+                  roleSlugs:
+                    description: |-
+                      RoleSlugs are the NetBox device roles whose out-of-band IP is a
+                      Redfish BMC, such as servers. Other devices' out-of-band IPs, for
+                      example a switch's management address, are never written as a BMC.
+                    items:
+                      maxLength: 100
+                      minLength: 1
+                      type: string
+                    maxItems: 64
+                    minItems: 1
+                    type: array
+                    x-kubernetes-list-type: set
+                required:
+                - roleSlugs
+                type: object
               cableMedia:
                 description: |-
                   CableMedia gives the reviewed medium of data cables by NetBox cable
