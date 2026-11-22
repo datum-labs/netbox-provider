@@ -7,3 +7,8 @@ rules:
   - apiGroups: [coordination.k8s.io]
     resources: [leases]
     verbs: [get, list, watch, create, update, patch, delete]
+  # Leader election records its transitions as core Events. The controller
+  # emits no other Events.
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch]

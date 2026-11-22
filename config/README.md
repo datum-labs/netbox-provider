@@ -105,7 +105,8 @@ ownership opt-in; each NetBoxSource's `mode: Create` is the second, per-source
 opt-in.
 
 The management-cluster service account has no cluster-wide role. It receives
-leader-election access and read access to NetBoxSources, NetBoxMappings and
+leader-election access (leases, and `create` and `patch` on Events, which
+record leader transitions) and read access to NetBoxSources, NetBoxMappings and
 Secrets, all in `netbox-provider-system`, and status writes on NetBoxSources.
 The manager's cache is scoped to that namespace with `--namespace`, so
 NetBoxSources in other namespaces are ignored. Secrets are fetched with `get`
