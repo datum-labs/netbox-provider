@@ -235,11 +235,17 @@ change one.
 - Records are applied Manufacturers first, then DeviceTypes, then Devices.
 
 **Other writers.** Fleet cannot enforce uniqueness across objects, so the
-controller checks. A Manufacturer from another writer with the same canonical
-name ignoring case, or a DeviceType from another writer for the same
-manufacturer (by canonical name) and model key, quarantines the controller's
-record as `Quarantined/CatalogDuplicate`, naming the other record, so a human
-decides which to keep. The other writer's record is never adopted or changed.
+controller checks, on every reconcile, whether or not its own record already
+exists. A Manufacturer from another writer whose canonical name or one of
+whose aliases equals the controller's canonical name ignoring case, or a
+DeviceType from another writer for the same manufacturer (matched the same
+way) and model key, with both models normalized by the same model-key rule,
+quarantines the controller's record as `Quarantined/CatalogDuplicate`, naming
+both records, so a human decides which to keep. Nothing more is applied to the
+controller's record while it is quarantined, a Device keeps a reference it
+already has, and neither record is changed or deleted. Two NetBox
+manufacturers whose names differ only in case are both
+`Quarantined/CanonicalNameCollision`.
 
 ## Writes: server-side apply
 
@@ -312,7 +318,7 @@ fixed budget.
 | Writes are non-forced server-side applies | The reconciler only calls `Apply` with field manager `netbox-provider`; tests wrap the Fleet client and fail on create, update, non-apply patch, delete, any status write, a forced apply, or another field manager | every reconcile spec |
 | Another writer's fields are kept, never taken | An apply conflict is `Quarantined/ApplyConflict`, naming the manager and field paths; other managers' fields survive applies | `keeps another manager's field`, `quarantines a conflict with another manager` |
 | Immutable fields stay immutable | A Device's identity or claim, or a claim's placement or lifecycle, that changes in NetBox is `Quarantined/ImmutableChanged` before any call | `quarantines a change to an immutable field`, `TestImmutableChangesAreQuarantined` |
-| Catalog records are never duplicated or rebound | A Manufacturer or DeviceType that another writer's record already describes is `Quarantined/CatalogDuplicate`; colliding model keys and canonical names are quarantined; a Device keeps its `deviceTypeRef` and is quarantined if NetBox moves it to another type | `TestOperatorWrittenCatalogRecordsAreNeverAdopted`, `TestModelKeyCollisionsAreQuarantined`, `TestImmutableCatalogChangesAreQuarantined`, `TestDeviceTypeRefsAreAddedLaterAndNeverRemoved`, `adds deviceTypeRef to Devices it applied` |
+| Catalog records are never duplicated or rebound | A Manufacturer or DeviceType that another writer's record already describes is `Quarantined/CatalogDuplicate`; colliding model keys and canonical names are quarantined; a Device keeps its `deviceTypeRef` and is quarantined if NetBox moves it to another type | `TestOperatorWrittenCatalogRecordsAreNeverAdopted`, `TestDuplicatesAppearingAfterOursQuarantineOurs`, `TestManufacturersDifferingOnlyInCaseAreQuarantined`, `TestModelKeyCollisionsAreQuarantined`, `TestImmutableCatalogChangesAreQuarantined`, `TestDeviceTypeRefsAreAddedLaterAndNeverRemoved`, `adds deviceTypeRef to Devices it applied` |
 | No two Devices share a BMC endpoint | A planned endpoint equal to another planned or existing Device's, from any writer, quarantines it | `TestDevicesNeverShareABMCEndpoint` |
 | Records not written by this controller are never adopted | Same name without matching correlation labels is `Quarantined/NameConflict`, even with an identical spec; Flux labels are named in the message | `never adopts an identical record that lacks this controller's labels`, `rejects an existing name from another writer`, `TestSameNameWithoutOurLabelsIsNeverAdopted` |
 | Equal records are no-ops; owned fields follow NetBox | Correlated by labels and this controller's apply ownership; unchanged digest and values send nothing, differences are `Update`. Records it did not apply are `Quarantined/NotApplyOwned` | `then is a no-op`, `TestOwnedFieldChangeIsUpdated`, `TestRecordNotAppliedByThisControllerIsNeverAdopted` |
