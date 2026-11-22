@@ -13,6 +13,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/yaml"
 
 	netboxv1alpha1 "go.miloapis.com/netbox-provider/api/v1alpha1"
@@ -51,6 +52,7 @@ func snapshot(t *testing.T) *netbox.Snapshot {
 		Cables:      load[netbox.Cable](t, netbox.CollectionCables),
 		PowerPanels: load[netbox.PowerPanel](t, netbox.CollectionPowerPanels),
 		PowerFeeds:  load[netbox.PowerFeed](t, netbox.CollectionPowerFeeds),
+		IPAddresses: load[netbox.IPAddress](t, netbox.CollectionIPAddresses),
 	}
 }
 
@@ -395,9 +397,19 @@ func previous(t *testing.T) []unstructured.Unstructured {
 	in.Mapping.Revision = "example-reviewed-0"
 	var out []unstructured.Unstructured
 	for _, c := range plan.Build(in).Candidates {
-		out = append(out, *c.Object.DeepCopy())
+		out = append(out, *applied(c.Object.DeepCopy()))
 	}
 	return out
+}
+
+// applied records a server-side apply by this controller, as the API server
+// would after a write.
+func applied(obj *unstructured.Unstructured) *unstructured.Unstructured {
+	obj.SetUID(types.UID("uid-" + obj.GetName()))
+	obj.SetManagedFields(append(obj.GetManagedFields(), metav1.ManagedFieldsEntry{
+		Manager: plan.FieldManager, Operation: metav1.ManagedFieldsOperationApply, APIVersion: "fleet.datumapis.com/v1alpha1",
+	}))
+	return obj
 }
 
 func withExisting(in plan.Input, objs ...unstructured.Unstructured) plan.Input {
@@ -436,19 +448,89 @@ func TestSameNameWithoutOurLabelsIsNeverAdopted(t *testing.T) {
 	}
 }
 
-func TestDifferingRecordFromSameSourceIsQuarantined(t *testing.T) {
+func TestOwnedFieldChangeIsUpdated(t *testing.T) {
 	objs := previous(t)
 	for i := range objs {
 		if objs[i].GetKind() == fleet.KindRack {
+			// Applied before NetBox changed the rack's height.
 			_ = unstructured.SetNestedField(objs[i].Object, int64(48), "spec", "heightUnits")
+			annotations := objs[i].GetAnnotations()
+			annotations[plan.AnnotationAppliedDigest] = "sha256:previous"
+			objs[i].SetAnnotations(annotations)
 		}
 	}
-	got := outcomes(plan.Build(withExisting(input(t), objs...)))
-	if got["Rack dcim/racks/100"].reason != plan.ReasonExistingDiffers {
-		t.Fatalf("rack %+v", got["Rack dcim/racks/100"])
+	p := plan.Build(withExisting(input(t), objs...))
+	rack := candidate(t, p, fleet.KindRack, "dcim/racks/100")
+	if rack.Action != plan.ActionUpdate || rack.Reason != plan.ReasonOwnedFieldsChanged || rack.ExistingUID != types.UID("uid-"+rack.Name) {
+		t.Fatalf("rack %+v", rack)
 	}
-	if got["Device dcim/devices/1000"].action != plan.ActionUnchanged {
-		t.Fatalf("device %+v", got["Device dcim/devices/1000"])
+	if field(t, rack, "heightUnits") != float64(42) {
+		t.Fatalf("the update applies NetBox's value: %v", field(t, rack, "heightUnits"))
+	}
+	got := outcomes(p)
+	if got["Device dcim/devices/1000"].action != plan.ActionUnchanged || got["DeviceClaim dcim/devices/1000"].action != plan.ActionUnchanged {
+		t.Fatalf("an update of the rack changes nothing else: %v", got)
+	}
+
+	// A field this controller applied before but no longer maps is removed by
+	// the next apply, so a stale digest alone means an update.
+	objs = previous(t)
+	for i := range objs {
+		if objs[i].GetKind() == fleet.KindDevice {
+			annotations := objs[i].GetAnnotations()
+			annotations[plan.AnnotationAppliedDigest] = "sha256:previous"
+			objs[i].SetAnnotations(annotations)
+		}
+	}
+	if got := outcomes(plan.Build(withExisting(input(t), objs...)))["Device dcim/devices/1000"]; got.action != plan.ActionUpdate {
+		t.Fatalf("stale digest: %+v", got)
+	}
+}
+
+func TestRecordNotAppliedByThisControllerIsNeverAdopted(t *testing.T) {
+	objs := previous(t)
+	for i := range objs {
+		objs[i].SetManagedFields([]metav1.ManagedFieldsEntry{{Manager: "kubectl", Operation: metav1.ManagedFieldsOperationUpdate}})
+	}
+	p := plan.Build(withExisting(input(t), objs...))
+	if n := p.Count(plan.ActionUnchanged) + p.Count(plan.ActionUpdate); n != 0 {
+		t.Fatalf("%d records with our labels but another manager were adopted", n)
+	}
+	if rack := candidate(t, p, fleet.KindRack, "dcim/racks/100"); rack.Reason != plan.ReasonNotApplyOwned {
+		t.Fatalf("rack %+v", rack)
+	}
+}
+
+func TestImmutableChangesAreQuarantined(t *testing.T) {
+	for name, tc := range map[string]struct {
+		kind, source string
+		mutate       func(*unstructured.Unstructured)
+		message      string
+	}{
+		"hardware identity": {fleet.KindDevice, "dcim/devices/1000", func(o *unstructured.Unstructured) {
+			_ = unstructured.SetNestedField(o.Object, "SYNTH-CHASSIS-OLD", "spec", "identity", "serial")
+		}, "a hardware swap is a new Device"},
+		"claim": {fleet.KindDevice, "dcim/devices/1000", func(o *unstructured.Unstructured) {
+			_ = unstructured.SetNestedField(o.Object, "another-claim", "spec", "claimRef", "name")
+		}, "claimRef immutable"},
+		"placement": {fleet.KindDeviceClaim, "dcim/devices/1007", func(o *unstructured.Unstructured) {
+			_ = unstructured.SetNestedField(o.Object, int64(39), "spec", "placement", "position")
+		}, "explicit handover"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			objs := previous(t)
+			for i := range objs {
+				if objs[i].GetKind() == tc.kind {
+					if ref, _ := plan.KeyOf(&objs[i]); ref.String() == tc.source {
+						tc.mutate(&objs[i])
+					}
+				}
+			}
+			c := candidate(t, plan.Build(withExisting(input(t), objs...)), tc.kind, tc.source)
+			if c.Action != plan.ActionQuarantined || c.Reason != plan.ReasonImmutableChanged || !strings.Contains(c.Message, tc.message) {
+				t.Fatalf("%+v", c)
+			}
+		})
 	}
 }
 

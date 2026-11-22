@@ -1,0 +1,5 @@
+[
+  {"id": 9000, "address": "192.0.2.10/24", "vrf": null, "status": {"value": "active"}, "dns_name": "must-not-be-retained.example.invalid"},
+  {"id": 9002, "address": "192.0.2.12/24", "vrf": null},
+  {"id": 9007, "address": "2001:db8::7/64", "vrf": null}
+]

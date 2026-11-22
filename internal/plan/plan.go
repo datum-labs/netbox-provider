@@ -3,10 +3,11 @@
 // Package plan turns a NetBox snapshot, a reviewed mapping, and the existing
 // Fleet records into an additive plan.
 //
-// Build is a pure function. The plan never contains an update, patch,
-// adoption or deletion: each target is either created, already present and
-// equal, or blocked with a reason. Existing records are never overwritten,
-// whoever wrote them.
+// Build is a pure function. Each target is created, updated in the fields
+// this controller owns, already present and equal, or blocked with a reason.
+// Records are written by server-side apply under FieldManager, so a record is
+// only ever updated in fields this controller applied. The plan never adopts a
+// record it did not apply, changes an immutable field, or deletes anything.
 package plan
 
 import (
@@ -18,7 +19,9 @@ import (
 	"strings"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/types"
 
 	netboxv1alpha1 "go.miloapis.com/netbox-provider/api/v1alpha1"
 	"go.miloapis.com/netbox-provider/internal/fleet"
@@ -30,7 +33,10 @@ const (
 	ReasonNew                   = "New"
 	ReasonUnchanged             = "Unchanged"
 	ReasonNameConflict          = "NameConflict"
-	ReasonExistingDiffers       = "ExistingDiffers"
+	ReasonOwnedFieldsChanged    = "OwnedFieldsChanged"
+	ReasonNotApplyOwned         = "NotApplyOwned"
+	ReasonImmutableChanged      = "ImmutableChanged"
+	ReasonApplyConflict         = "ApplyConflict"
 	ReasonExistingDeleting      = "ExistingDeleting"
 	ReasonSourceAlreadyRecorded = "SourceAlreadyRecorded"
 	ReasonIdentityCollision     = "IdentityCollision"
@@ -66,9 +72,11 @@ const (
 // Action is what happens to a planned target.
 type Action string
 
-// Actions. Create is the only action with an effect.
+// Actions. Create and Update are the only actions with an effect; both are a
+// server-side apply.
 const (
 	ActionCreate      Action = "Create"
+	ActionUpdate      Action = "Update"
 	ActionUnchanged   Action = "Unchanged"
 	ActionQuarantined Action = "Quarantined"
 	ActionUnresolved  Action = "Unresolved"
@@ -84,7 +92,13 @@ type Candidate struct {
 	Reason    string
 	Message   string
 	DependsOn []string
+	// ExistingUID is the UID of the record an Update applies to. The apply
+	// carries it as a precondition, so it never lands on a replacement.
+	ExistingUID types.UID
 }
+
+// FieldManager is the server-side apply field manager of every write.
+const FieldManager = "netbox-provider"
 
 // Key is Kind/name.
 func (c *Candidate) Key() string { return c.Kind + "/" + c.Name }
@@ -141,6 +155,8 @@ type builder struct {
 	deviceByID map[int64]*Candidate
 	parts      map[int64]*deviceParts
 	bmcRoles   map[string]bool
+	bmcVRFs    map[int64]bool
+	ips        map[int64]netbox.IPAddress
 	components map[string]owned
 	logical    map[string]bool
 	premises   map[netboxv1alpha1.PremisesSourceType]map[int64]string
@@ -164,11 +180,17 @@ func Build(in Input) *Plan {
 		f := &in.Existing[fleet.KindFacility][i]
 		b.facilities[f.GetName()] = f
 	}
-	b.bmcRoles = map[string]bool{}
+	b.bmcRoles, b.bmcVRFs, b.ips = map[string]bool{}, map[int64]bool{}, map[int64]netbox.IPAddress{}
 	if in.Mapping.BMC != nil {
 		for _, slug := range in.Mapping.BMC.RoleSlugs {
 			b.bmcRoles[slug] = true
 		}
+		for _, vrf := range in.Mapping.BMC.VRFIDs {
+			b.bmcVRFs[vrf] = true
+		}
+	}
+	for _, ip := range in.Snapshot.IPAddresses {
+		b.ips[ip.ID] = ip
 	}
 	b.mapPremises()
 	b.racks()
@@ -242,6 +264,10 @@ func (b *builder) add(kind, source string, spec any, ref SourceKey, deps ...stri
 		AnnotationObservedAt:      b.sourceAt,
 	}
 	obj, err := fleet.NewObject(kind, b.in.Namespace, name, ref.Labels(), annotations, spec)
+	if err == nil {
+		annotations[AnnotationAppliedDigest] = AppliedDigest(obj)
+		obj.SetAnnotations(annotations)
+	}
 	c := &Candidate{Kind: kind, Name: name, Source: source, Object: obj, Action: ActionCreate, Reason: ReasonNew, DependsOn: deps}
 	if err != nil {
 		c.Action, c.Reason, c.Message = ActionUnresolved, ReasonFieldTooLong, "record cannot be encoded"
@@ -457,7 +483,7 @@ func (b *builder) device(source string, device netbox.Device, m netboxv1alpha1.D
 	}
 	note := ""
 	if device.Role != nil && b.bmcRoles[device.Role.Slug] {
-		endpoint, problem := bmcEndpoint(device)
+		endpoint, problem := bmcEndpoint(device, b.ips, b.bmcVRFs)
 		switch {
 		case identity.Unidentified:
 			note = "no BMC endpoint: a Device without hardware identity cannot record one"
@@ -499,7 +525,14 @@ func (b *builder) reconcile() {
 		case ok && current.GetDeletionTimestamp() != nil:
 			c.Action, c.Reason, c.Message = ActionQuarantined, ReasonExistingDeleting, "a record with this name is being deleted; nothing is written"
 		case ok:
+			note := c.Message
 			c.Action, c.Reason, c.Message = Compare(current, c.Object)
+			if c.Action == ActionUpdate {
+				c.ExistingUID = current.GetUID()
+			}
+			if note != "" && c.Action != ActionQuarantined {
+				c.Message = strings.TrimPrefix(c.Message+"; "+note, "; ")
+			}
 		default:
 			if other, found := bySource[c.Kind+"/"+ref.qualified()]; found && other != c.Name {
 				c.Action, c.Reason = ActionQuarantined, ReasonSourceAlreadyRecorded
@@ -509,11 +542,13 @@ func (b *builder) reconcile() {
 	}
 }
 
-// Compare classifies an existing record with the candidate's name. A record
-// without this controller's matching correlation labels was not written by it
-// and is never adopted. Otherwise it is Unchanged only when every spec field
-// the candidate would write is present and equal, ignoring annotations. Fields that another writer added
-// are allowed and never touched.
+// Compare classifies an existing record with the candidate's name. A record is
+// only ever written again if it carries this source's correlation labels and
+// this controller's server-side apply ownership: anything else was written by
+// another writer and is never adopted. A change to a field Fleet keeps
+// immutable is quarantined before any write. Otherwise the record is Unchanged
+// when the last applied digest and every applied value match, and Update when
+// a field this controller owns differs.
 func Compare(current, candidate *unstructured.Unstructured) (Action, string, string) {
 	want, _ := KeyOf(candidate)
 	got, ok := KeyOf(current)
@@ -526,12 +561,50 @@ func Compare(current, candidate *unstructured.Unstructured) (Action, string, str
 		}
 		return ActionQuarantined, ReasonNameConflict, fmt.Sprintf("a record with this name exists from %s without this source's labels; it is never overwritten or adopted", writer)
 	}
-	currentSpec := normalize(current.Object["spec"])
-	candidateSpec := normalize(candidate.Object["spec"])
-	if !subset(candidateSpec, currentSpec) {
-		return ActionQuarantined, ReasonExistingDiffers, "the record this controller created differs from NetBox now; corrections are reviewed, never last-import-wins"
+	if !AppliedBy(current, FieldManager) {
+		return ActionQuarantined, ReasonNotApplyOwned, "the record carries this source's labels but was not server-side applied by " + FieldManager + "; it is never adopted"
 	}
-	return ActionUnchanged, ReasonUnchanged, ""
+	if message := immutableChange(candidate.GetKind(), current, candidate); message != "" {
+		return ActionQuarantined, ReasonImmutableChanged, message
+	}
+	if current.GetAnnotations()[AnnotationAppliedDigest] == candidate.GetAnnotations()[AnnotationAppliedDigest] &&
+		subset(normalize(candidate.Object["spec"]), normalize(current.Object["spec"])) {
+		return ActionUnchanged, ReasonUnchanged, ""
+	}
+	return ActionUpdate, ReasonOwnedFieldsChanged, "a field this controller owns differs from NetBox; it is re-applied"
+}
+
+// AppliedBy reports whether manager has server-side applied the record.
+func AppliedBy(obj *unstructured.Unstructured, manager string) bool {
+	for _, entry := range obj.GetManagedFields() {
+		if entry.Manager == manager && entry.Operation == metav1.ManagedFieldsOperationApply && entry.Subresource == "" {
+			return true
+		}
+	}
+	return false
+}
+
+// immutableFields are the spec fields Fleet keeps immutable once written, with
+// what a change in NetBox means.
+var immutableFields = map[string][]struct{ field, message string }{
+	fleet.KindDevice: {
+		{"identity", "hardware identity changed in NetBox; Fleet keeps a Device's identity immutable, so a hardware swap is a new Device"},
+		{"claimRef", "the Device's claim changed; Fleet keeps claimRef immutable, so replacement hardware is a new Device"},
+	},
+	fleet.KindDeviceClaim: {
+		{"placement", "placement changed in NetBox; Fleet keeps an installation's placement immutable, and a move needs an explicit handover"},
+		{"lifecycle", "the claim's lifecycle changed; Fleet keeps it immutable"},
+	},
+}
+
+func immutableChange(kind string, current, candidate *unstructured.Unstructured) string {
+	want, got := normalize(candidate.Object["spec"]), normalize(current.Object["spec"])
+	for _, f := range immutableFields[kind] {
+		if !reflect.DeepEqual(want[f.field], got[f.field]) {
+			return f.message
+		}
+	}
+	return ""
 }
 
 func normalize(v any) map[string]any {
@@ -606,6 +679,21 @@ func (b *builder) collisions() {
 			eq(a.AssetTag, o.AssetTag) || hostEq(a.ProviderHostRef, o.ProviderHostRef) ||
 			eq(hostID(a.ProviderHostRef), o.Identity.Serial) || eq(a.Identity.Serial, hostID(o.ProviderHostRef))
 	}
+	// A BMC endpoint is the path to enrollment and wiping, so two Devices,
+	// planned or existing from any writer, may never share one.
+	for i, a := range all {
+		if a.c == nil || (a.c.Action != ActionCreate && a.c.Action != ActionUpdate) || a.spec.BMC == nil {
+			continue
+		}
+		for j, o := range all {
+			if i == j || o.spec.BMC == nil || o.spec.BMC.Endpoint != a.spec.BMC.Endpoint || o.name == a.name {
+				continue
+			}
+			a.c.Action, a.c.Reason = ActionQuarantined, ReasonBMCCollision
+			a.c.Message = fmt.Sprintf("Device %q and Device %q have the same BMC endpoint; neither is written with it until one is corrected", a.name, o.name)
+			break
+		}
+	}
 	for i, a := range all {
 		if a.c == nil || a.c.Action != ActionCreate {
 			continue
@@ -624,7 +712,9 @@ func (b *builder) collisions() {
 // propagate blocks creates whose dependencies will not exist, and keeps a
 // source record's claim and device together.
 func (b *builder) propagate() {
-	usable := func(c *Candidate) bool { return c.Action == ActionCreate || c.Action == ActionUnchanged }
+	usable := func(c *Candidate) bool {
+		return c.Action == ActionCreate || c.Action == ActionUpdate || c.Action == ActionUnchanged
+	}
 	for changed := true; changed; {
 		changed = false
 		cohorts := map[string][]*Candidate{}
@@ -634,7 +724,7 @@ func (b *builder) propagate() {
 			}
 		}
 		for _, c := range b.plan.Candidates {
-			if c.Action != ActionCreate {
+			if c.Action != ActionCreate && c.Action != ActionUpdate {
 				continue
 			}
 			for _, dep := range c.DependsOn {
@@ -644,7 +734,7 @@ func (b *builder) propagate() {
 					break
 				}
 			}
-			if c.Action != ActionCreate {
+			if c.Action != ActionCreate && c.Action != ActionUpdate {
 				continue
 			}
 			for _, peer := range cohorts[c.Source] {

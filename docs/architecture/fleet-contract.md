@@ -16,7 +16,7 @@ The schema is Fleet's target inventory schema from
 | --- | --- | --- |
 | [datum-cloud/fleet#105](https://github.com/datum-cloud/fleet/pull/105) | Merged | Makes record-authorship metadata optional, so records without it are admitted. |
 | [datum-cloud/fleet#106](https://github.com/datum-cloud/fleet/pull/106) | Merged | The target schema: removes record-authorship metadata, component source references and Fleet's NetBox import support. A Device's identity needs a serial or system UUID. |
-| [datum-cloud/fleet#101](https://github.com/datum-cloud/fleet/pull/101) | Merged | The create-only importer role below. |
+| [datum-cloud/fleet#101](https://github.com/datum-cloud/fleet/pull/101) | Merged | The importer role below. It grants `create` only; server-side apply also needs `patch`. |
 | [datum-cloud/fleet#110](https://github.com/datum-cloud/fleet/pull/110) | Merged | `identity.unidentified` and `identity.unidentifiedReason`: a Device with no recorded hardware identity. A Fleet deployment without it rejects such Devices, so they are quarantined and their cables blocked. |
 
 A Fleet deployment older than #105 requires authorship metadata that this
@@ -29,10 +29,18 @@ written.
 Racks, PowerFeeds, DeviceClaims, Devices with their components and internal
 mappings, and Cables, with only the physical facts in the
 [design](design.md#mapping-netbox-to-fleet). A Device in a role the mapping
-lists also gets `spec.bmc.endpoint` from NetBox's out-of-band IP. It never
-writes Facilities,
-`reportedPlacement`, `MachineCapacity` or `deviceRef`, and never updates,
-patches or deletes a record.
+lists also gets `spec.bmc.endpoint` from NetBox's out-of-band IP. That copy
+is interim: Fleet assigns out-of-band BMC addresses to Networking/IPAM, and
+datum-cloud/fleet#132 tracks replacing it with a reference to an IPAM-issued
+address.
+
+Every write is a server-side apply as field manager `netbox-provider`, never
+forced, holding only those fields and this controller's labels and
+annotations (see [Writes](design.md#writes-server-side-apply)). It creates
+missing records and updates the fields it owns; other writers' fields are
+kept, and a field another writer owns is a quarantined conflict. It never
+writes Facilities, Sites, status, `reportedPlacement`, `MachineCapacity` or
+`deviceRef`, and never deletes a record.
 
 Fleet requires a Device to have a serial or system UUID, or to say explicitly
 that it has no recorded hardware identity. The controller writes the serial
@@ -73,8 +81,10 @@ newlines. See `internal/plan/correlation.go`.
 
 ## The importer role
 
-The controller's Milo identity needs a create-only role in the provider
-project. #101 adds `config/components/inventory/roles/importer.yaml` to
+The controller's Milo identity needs, in the provider project, `get` and
+`list` on the physical kinds and `create` and `patch` on the kinds it writes.
+Server-side apply needs both: `create` for a record's first apply and `patch`
+for later ones. #101 adds `config/components/inventory/roles/importer.yaml` to
 `config/milo`:
 
 ```yaml
@@ -100,9 +110,14 @@ spec:
 ```
 
 The role inherits the viewer role, adds `create` on all seven physical kinds,
-and grants no update, patch, delete or status verbs. This controller uses only
-`create` on Racks, PowerFeeds, DeviceClaims, Devices and Cables; it never
-creates Facilities or Sites, even though the role would allow it.
+and grants no update, patch, delete or status verbs. That is not enough for
+server-side apply. **Proposed Fleet change:** add `patch` on Racks,
+PowerFeeds, DeviceClaims, Devices and Cables, keeping it free of `update`,
+`delete` and status verbs, so the role can still only add and adjust records,
+never remove them. Until Fleet ships that, an environment grants the same
+verbs itself. This controller uses `create` and `patch` on those five kinds
+only; it never writes Facilities or Sites, even though the role would allow
+creating them.
 
 This controller's own kinds stay on the cluster it runs on and are not
 registered in Milo, so Fleet needs no ProtectedResources for them.

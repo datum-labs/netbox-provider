@@ -5,6 +5,7 @@ package plan
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -27,7 +28,20 @@ const (
 	AnnotationSnapshotDigest  = "netbox.miloapis.com/snapshot-digest"
 	AnnotationMappingRevision = "netbox.miloapis.com/mapping-revision"
 	AnnotationObservedAt      = "netbox.miloapis.com/observed-at"
+	// AnnotationAppliedDigest is the sha256 of the labels and spec this
+	// controller last applied. A record whose digest and owned values match
+	// the plan is Unchanged and is not applied again; the other annotations
+	// then keep describing the observation those fields came from.
+	AnnotationAppliedDigest = "netbox.miloapis.com/applied-digest"
 )
+
+// AppliedDigest is the digest of an applied configuration's labels and spec.
+// It excludes the annotations, which change with every observation.
+func AppliedDigest(obj *unstructured.Unstructured) string {
+	data, _ := json.Marshal(map[string]any{"labels": obj.GetLabels(), "spec": obj.Object["spec"]})
+	sum := sha256.Sum256(data)
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
 
 // SourceKey identifies one NetBox record of one source.
 type SourceKey struct {

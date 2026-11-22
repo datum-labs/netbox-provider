@@ -24,6 +24,7 @@ const (
 	CollectionCables             = "dcim/cables"
 	CollectionPowerPanels        = "dcim/power-panels"
 	CollectionPowerFeeds         = "dcim/power-feeds"
+	CollectionIPAddresses        = "ipam/ip-addresses"
 )
 
 // ComponentCollections are the device component collections, in read order.

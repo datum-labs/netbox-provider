@@ -48,7 +48,8 @@ implemented.
   Fleet's group. See [config/README.md](../../config/README.md).
 - Fleet has no code that refers to this controller, and the controller needs
   no Fleet API change; see [how it uses Fleet](fleet-contract.md). Its only
-  Fleet dependency is the create-only importer role.
+  Fleet dependency is a role that grants `create` and `patch` on the kinds it
+  writes.
 
 ## API: `netbox.miloapis.com/v1alpha1`
 
@@ -92,6 +93,7 @@ The reviewed interpretation of a source. Nothing is imported without it.
 | `cableMedia[]` | `{cableTypes, medium}`: the reviewed medium (`Copper`, `Fiber` or `Unknown`) of data cables by NetBox cable type. |
 | `untypedCableMedium` | The medium of data cables with no NetBox cable type. Unset leaves them `Unresolved`. |
 | `bmc.roleSlugs` | NetBox device roles whose out-of-band IP is a Redfish BMC. Devices with a chassis serial in these roles get `spec.bmc.endpoint`. Unset writes no BMC. |
+| `bmc.vrfIDs` | NetBox VRFs whose out-of-band IPs may be used. The global table is always usable; any other VRF is not. |
 | `exclusions[]` | Role-slug exclusions with a reason, for example hosted VMs recorded in DCIM. Exclusions win over device decisions. |
 
 CEL enforces the combinations: excluded devices need a reason; physical devices
@@ -107,7 +109,9 @@ three the device is `Unresolved`, never placed by inference.
    cluster-wide). A missing mapping, Secret, or key, or an empty or whitespace
    token, sets `ConfigurationResolved=False` and makes no NetBox request.
 2. **Read NetBox.** One sequential, complete read of sites, locations, racks,
-   device types and devices. Any failure discards the whole read and sets
+   device types, devices, their components, power panels and feeds, cables,
+   and the devices' out-of-band IP records. Each collection read is bounded
+   by the source's [read limits](#read-limits). Any failure discards the whole read and sets
    `SourceObserved=Unknown` and `Ready=Unknown`; nothing is planned or written.
    A `401` or `403` is different: retrying the same token cannot succeed, and
    NetBox installations commonly ban addresses after repeated rejections. It
@@ -118,16 +122,17 @@ three the device is `Unresolved`, never placed by inference.
    namespace through an uncached client. Any failure sets `FleetObserved=Unknown`
    and `Ready=Unknown`.
 4. **Plan.** `internal/plan.Build` is a pure function of the snapshot, mapping
-   and Fleet state. Every candidate is `Create`, `Unchanged`, `Quarantined` or
-   `Unresolved`. There is no update, patch, adoption or delete action.
+   and Fleet state. Every candidate is `Create`, `Update`, `Unchanged`,
+   `Quarantined` or `Unresolved`. There is no adoption or delete action.
 5. **Apply, only in Create mode.** First write status naming the snapshot digest
-   and mapping revision that the creates come from. Then create racks, power
-   feeds, claims, devices, and cables, each after what it references. `AlreadyExists` re-reads and classifies the record,
-   never overwrites it. A definite rejection quarantines the record. Any other
-   error makes the outcome unknown: `Applied=Unknown`, `Ready=Unknown`, its
-   dependents are skipped, and the next reconcile re-observes Fleet before
-   retrying. In `Observe` mode, `Applied=False` with reason `ObserveOnly` and a
-   count of what would be created.
+   and mapping revision the writes come from. Then apply racks, power feeds,
+   claims, devices and cables, each after what it references, as described in
+   [Writes](#writes-server-side-apply). A definite rejection quarantines the
+   record. Any other error makes the outcome unknown: `Applied=Unknown`,
+   `Ready=Unknown`, its dependents are skipped, and the next reconcile
+   re-observes Fleet before retrying. In `Observe` mode, `Applied=False` with
+   reason `ObserveOnly` and counts of what would be created and updated, and
+   no write call is made.
 6. **Summarize.** `Ready=True` only when configuration, NetBox and Fleet were
    all observed completely and nothing is quarantined or unresolved. `Ready`
    describes this import, never the readiness of a Fleet record or of hardware.
@@ -145,10 +150,10 @@ a terminal error.
 | site, location | existing `Facility` | Only through `facilities[]`. The controller never creates Facilities: premises identity is operator-owned and a site name is not proof of premises. A missing or deleting Facility leaves dependents `Unresolved`. |
 | rack | `Rack` | `facilityRef` from the rack's mapped location, else its mapped site. `heightUnits` only when integral and 1 to 100. |
 | device | `DeviceClaim` + `Device` | Only devices listed as `Physical`. The claim is `lifecycle: Installation` with `Facility`, `RackMembership` or `RackUnits` placement; only `RackUnits` writes position, height and face. The device binds to the claim, carries `topologyAuthority: Cable`, the model shape, the asset tag as `assetTag`, and its components. |
-| component | `Device.spec.components[]`, `internalMappings[]` | Interfaces, power ports and outlets, console and console server ports, front and rear ports, modules, inventory items and device bays, with ID `<collection>-<NetBox ID>` and the NetBox port type as `connector`. Virtual, LAG and bridge interfaces are networking, not components. A rear port needs a position count. Each front port position maps to its rear port position (NetBox 4.5 and later list one mapping per position; older NetBox records one), and outlets map to the inlet that feeds them. If any component or path cannot be recorded exactly, or there are more than 256, the Device is `Unresolved/ComponentsInvalid`: records are create-only, so a partial list could never be completed. |
+| component | `Device.spec.components[]`, `internalMappings[]` | Interfaces, power ports and outlets, console and console server ports, front and rear ports, modules, inventory items and device bays, with ID `<collection>-<NetBox ID>` and the NetBox port type as `connector`. Virtual, LAG and bridge interfaces are networking, not components. A rear port needs a position count. Each front port position maps to its rear port position (NetBox 4.5 and later list one mapping per position; older NetBox records one), and outlets map to the inlet that feeds them. If any component or path cannot be recorded exactly, or there are more than 256, the Device is `Unresolved/ComponentsInvalid`: a Device's components are written in one apply, so a partial list is never recorded. |
 | power feed | `PowerFeed` | `facilityRef` from its power panel's mapped location or site; `rackRef` when NetBox names a rack; supply type, voltage, current and phase; one `output` power outlet termination. A planned feed is excluded. The panel is not written: it has no Fleet kind, and an external reference would be a source field. |
 | cable | `Cable` | One lane between two planned endpoints: a component of a created Device or a feed output. An endpoint on a device without a created Device, outside the scope, logical, or a circuit leaves the cable `Unresolved`. Power cables must join an outlet and an inlet and console cables two console components; their medium follows. Data cables take the reviewed medium of their NetBox type. Planned cables are excluded; cables with several terminations per side and multi-position endpoints are not imported, because lanes are never inferred. |
-| out-of-band IP | `Device.spec.bmc.endpoint` | Only for roles listed in `bmc.roleSlugs` and Devices with a chassis serial; never on an unidentified Device. Written as `https://<IPv4>:443`, the literal form Fleet's Redfish executor accepts, with NetBox's prefix length dropped. An absent, IPv6, or non-unicast address writes no BMC and the Device is still created, with the reason in its plan message. A switch's or PDU's management address is not a BMC, so roles are listed explicitly. |
+| out-of-band IP | `Device.spec.bmc.endpoint` | **Interim.** Fleet's design assigns out-of-band BMC addresses to Networking/IPAM; datum-cloud/fleet#132 tracks replacing this copied endpoint with a reference to an IPAM-issued address, and datum-cloud/fleet#130 tracks discovering hardware details from the BMC. Only for roles listed in `bmc.roleSlugs` and Devices with a chassis serial, never on an unidentified Device. The address comes from the `ipam/ip-addresses` record, read for its VRF: an address in a VRF the mapping does not list in `bmc.vrfIDs` is never treated as global. Written as `https://<IPv4>:443`, the literal form Fleet's Redfish executor accepts, with NetBox's prefix length dropped. IPv6, `0.0.0.0/8`, `240.0.0.0/4` (including `255.255.255.255`), loopback, link-local and multicast addresses write no BMC, and the Device is still created with the reason in its plan message. A Device whose endpoint matches another Device's, planned or existing from any writer, is `Quarantined/BMCEndpointCollision`, naming both. A switch's or PDU's management address is not a BMC, so roles are listed explicitly. |
 | device type | `identity.model`, `manufacturer`, `modelShape` | A device without a model is `Unresolved`; Fleet requires one. |
 | serial | depends on `serialMeaning` | `Chassis` with a value: `identity.serial` and `expectedIdentity.serial`. `Unknown`, or `Chassis` with an empty serial: no serial is written, and the Device carries Fleet's `identity.unidentified: true` with a fixed reason. `ProviderHostID`: the DeviceClaim is created and the Device is `Unresolved/IdentityUnavailable`. Identity is never invented. |
 | record identity | labels `netbox.miloapis.com/{source,type,id}` | Correlation is this controller's metadata, not a Fleet field. See [how it uses Fleet](fleet-contract.md#correlation-is-this-controllers-metadata). |
@@ -189,14 +194,78 @@ Circuits, power panels, operational Sites, service associations and
 (`hack/netbox_inventory.py`, removed by datum-cloud/fleet#106) is the reference
 for component IDs, internal mappings and cable endpoints.
 
+## Writes: server-side apply
+
+Every Fleet write is a server-side apply as field manager `netbox-provider`,
+never forced. The applied configuration holds only the spec fields mapped from
+NetBox and this controller's `netbox.miloapis.com/*` labels and annotations,
+so `managedFields` records exactly those as owned by `netbox-provider`. Status
+is never sent, and nothing else is: other writers, such as an operator or a
+future collector writing device status (datum-cloud/fleet#130), keep their
+fields.
+
+| Existing record | Outcome |
+| --- | --- |
+| None | `Create`: the first apply creates it. If another manager turns out to have created the name between observation and apply, the record is quarantined as `NameConflict`, never treated as this controller's. |
+| Same name without this source's labels | `Quarantined/NameConflict`; never written. |
+| This source's labels, but not applied by `netbox-provider` | `Quarantined/NotApplyOwned`; never adopted. |
+| Applied by `netbox-provider`, and an immutable field would change | `Quarantined/ImmutableChanged`; no call is made. A Device's `identity` and `claimRef`, and a claim's `placement` and `lifecycle`, are immutable in Fleet; for example, "hardware identity changed in NetBox; ... a hardware swap is a new Device". A record is never deleted and recreated. Other rejections Fleet makes are quarantined with its message. |
+| Applied by `netbox-provider`, last applied digest and values equal | `Unchanged`; nothing is sent. |
+| Applied by `netbox-provider`, otherwise | `Update`: the plan is re-applied, preconditioned on the observed UID. A field another manager now owns is an apply conflict: `Quarantined/ApplyConflict`, naming the manager and field paths. |
+
+A claim and its Device move together: if either is blocked, the other is not
+written either.
+
+**Steady state makes no apply calls.** Each written record carries the
+`netbox.miloapis.com/applied-digest` annotation, the sha256 of the labels and
+spec last applied. A record is `Unchanged`, and is not sent, when that digest
+matches the plan's and every planned spec value is present and equal. The
+digest catches fields this controller stopped mapping, whose removal needs an
+apply; the value check catches drift. Applying anyway would be a no-op, but it
+would cost one request per record each interval and refresh the observation
+annotations, which would then no longer say which observation the owned
+fields came from. A field another writer forced away is seen as drift, and its
+re-apply conflicts and is quarantined.
+
+**Migration.** Because owned fields follow NetBox, a record this controller
+applied gains what later versions map:
+
+- Devices applied before components, internal mappings or BMC endpoints were
+  imported get them through an `Update`, and the cables to their new
+  components are then created.
+- Turning on `bmc` for a mapping whose Devices already exist, or fixing an
+  address later, updates those Devices' `spec.bmc`, which Fleet does not keep
+  immutable.
+- Records written before writes were server-side applies (by `Create`) are not
+  owned by `netbox-provider`, and stay `Quarantined/NotApplyOwned` until an
+  operator removes them or transfers their ownership.
+
+## Read limits
+
+A NetBoxSource's `spec.readLimits` bounds each collection read. A read that
+exceeds a bound fails as a whole, and nothing is planned from it.
+
+| Field | Default | Bounds |
+| --- | --- | --- |
+| `maxRecordsPerCollection` | 20000 | 1 to 1000000. The page bound scales with it at 200 records per page, never below 1000 pages. |
+| `maxMiBPerCollection` | 64 | 1 to 4096. Each page is still bounded at 4 MiB. |
+| `collectionTimeout` | 2m | 10s to 30m, for each collection. Each request is also bounded at 30 seconds. |
+
+The timeout bounds each collection, not the whole snapshot, so a NetBox with
+many large collections can complete a snapshot that would not fit in one
+fixed budget.
+
 ## Safety rules and how they are enforced
 
 | Rule | Enforcement | Test |
 | --- | --- | --- |
 | Observe by default; writes need explicit opt-in | CRD default `mode: Observe`; apply only runs in `Create` | `observes only by default`, `defaults to observe-only` |
-| Additive only | The reconciler only calls `Create`; tests wrap the Fleet client and fail on any update, patch, delete, or status write | every reconcile spec |
+| Writes are non-forced server-side applies | The reconciler only calls `Apply` with field manager `netbox-provider`; tests wrap the Fleet client and fail on create, update, non-apply patch, delete, any status write, a forced apply, or another field manager | every reconcile spec |
+| Another writer's fields are kept, never taken | An apply conflict is `Quarantined/ApplyConflict`, naming the manager and field paths; other managers' fields survive applies | `keeps another manager's field`, `quarantines a conflict with another manager` |
+| Immutable fields stay immutable | A Device's identity or claim, or a claim's placement or lifecycle, that changes in NetBox is `Quarantined/ImmutableChanged` before any call | `quarantines a change to an immutable field`, `TestImmutableChangesAreQuarantined` |
+| No two Devices share a BMC endpoint | A planned endpoint equal to another planned or existing Device's, from any writer, quarantines it | `TestDevicesNeverShareABMCEndpoint` |
 | Records not written by this controller are never adopted | Same name without matching correlation labels is `Quarantined/NameConflict`, even with an identical spec; Flux labels are named in the message | `never adopts an identical record that lacks this controller's labels`, `rejects an existing name from another writer`, `TestSameNameWithoutOurLabelsIsNeverAdopted` |
-| Equal records are no-ops; different ones are not last-import-wins | Correlated by labels, then subset comparison of the spec; differences are `Quarantined/ExistingDiffers` | `then is a no-op`, `TestRecordsCorrelatedByLabelsAreUnchanged`, `TestDifferingRecordFromSameSourceIsQuarantined` |
+| Equal records are no-ops; owned fields follow NetBox | Correlated by labels and this controller's apply ownership; unchanged digest and values send nothing, differences are `Update`. Records it did not apply are `Quarantined/NotApplyOwned` | `then is a no-op`, `TestOwnedFieldChangeIsUpdated`, `TestRecordNotAppliedByThisControllerIsNeverAdopted` |
 | Identity collisions are quarantined | Serial, system UUID, asset tag, provider host ID, or provider host ID versus serial matching another Device | `quarantines an identity collision`, `TestIdentityCollisionsAreQuarantined` |
 | No duplicate of a source already labelled under another name | `Quarantined/SourceAlreadyRecorded` | `TestSourceLabelledUnderAnotherNameIsNotDuplicated` |
 | No invented identity | A Device without a reviewed chassis serial carries the unidentified marker, never a serial; a provider-hosted server is `Unresolved/IdentityUnavailable` with its claim still created | `records a device without a chassis serial as unidentified`, `TestDeviceWithoutSerialIsRecordedAsUnidentified`, `admits the unidentified marker only without serial, system UUID or BMC` |
@@ -296,9 +365,10 @@ Generated with the template's `hack/rename.sh --service-name netbox-provider
   is set per deployment, not per NetBoxSource. Serving another provider project
   means another deployment. Revisit only when one deployment needs to serve
   several projects.
-- The controller's Milo identity is bound to Fleet's create-only
-  `fleet.datumapis.com-inventory-importer` role, scoped to the provider
-  project. See [the importer role](fleet-contract.md#the-one-fleet-dependency-the-importer-role).
+- The controller's Milo identity is bound to a role with `get` and `list` on
+  the physical kinds and `create` and `patch` on the kinds it writes, scoped to
+  the provider project. Fleet's `fleet.datumapis.com-inventory-importer` role
+  grants only `create`; see [the importer role](fleet-contract.md#the-importer-role).
 
 ## Open questions
 

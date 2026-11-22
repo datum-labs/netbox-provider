@@ -319,24 +319,84 @@ func TestFrontPortPositionMappings(t *testing.T) {
 }
 
 func TestBMCEndpoint(t *testing.T) {
+	endpoint := func(address string, vrf *netbox.Ref, allowed ...int64) (string, string) {
+		vrfs := map[int64]bool{}
+		for _, v := range allowed {
+			vrfs[v] = true
+		}
+		ips := map[int64]netbox.IPAddress{1: {ID: 1, Address: address, VRF: vrf}}
+		return plan.BMCEndpoint(netbox.Device{OOBIP: &netbox.IPAddressRef{ID: 1, Address: address}}, ips, vrfs)
+	}
 	for address, want := range map[string]string{
 		"192.0.2.10/24":         "https://192.0.2.10:443",
 		"192.0.2.10":            "https://192.0.2.10:443",
 		"::ffff:192.0.2.10/120": "https://192.0.2.10:443",
 		"2001:db8::7/64":        "",
 		"0.0.0.0/0":             "",
+		"0.1.2.3/8":             "",
+		"240.0.0.1/4":           "",
+		"250.1.2.3/24":          "",
+		"255.255.255.255/32":    "",
 		"127.0.0.1/8":           "",
 		"169.254.0.5/16":        "",
+		"224.0.0.5/24":          "",
 		"not-an-address":        "",
 		"":                      "",
 	} {
-		got, problem := plan.BMCEndpoint(netbox.Device{OOBIP: &netbox.IPAddressRef{Address: address}})
+		got, problem := endpoint(address, nil)
 		if got != want || (want == "") == (problem == "") {
 			t.Errorf("%q: endpoint %q problem %q, want %q", address, got, problem, want)
 		}
 	}
-	if got, problem := plan.BMCEndpoint(netbox.Device{}); got != "" || problem == "" {
+	if got, problem := endpoint("192.0.2.10/24", &netbox.Ref{ID: 5}); got != "" || !strings.Contains(problem, "VRF 5") {
+		t.Errorf("an address in a VRF the mapping does not allow was used: %q %q", got, problem)
+	}
+	if got, _ := endpoint("192.0.2.10/24", &netbox.Ref{ID: 5}, 5); got != "https://192.0.2.10:443" {
+		t.Errorf("an allowed VRF: %q", got)
+	}
+	if got, problem := plan.BMCEndpoint(netbox.Device{}, nil, nil); got != "" || problem == "" {
 		t.Errorf("no out-of-band IP: %q %q", got, problem)
+	}
+	if got, problem := plan.BMCEndpoint(netbox.Device{OOBIP: &netbox.IPAddressRef{ID: 2, Address: "192.0.2.10/24"}}, nil, nil); got != "" || !strings.Contains(problem, "not in the snapshot") {
+		t.Errorf("the nested address is never used without its record: %q %q", got, problem)
+	}
+}
+
+func TestBMCInAnotherVRFIsNotWritten(t *testing.T) {
+	in := input(t)
+	in.Snapshot.IPAddresses[0].VRF = &netbox.Ref{ID: 5}
+	server := candidate(t, plan.Build(in), fleet.KindDevice, "dcim/devices/1000")
+	if field(t, server, "bmc") != nil || !strings.Contains(server.Message, "VRF 5") || server.Action != plan.ActionCreate {
+		t.Fatalf("bmc %v message %q", field(t, server, "bmc"), server.Message)
+	}
+	in.Mapping.BMC.VRFIDs = []int64{5}
+	if field(t, candidate(t, plan.Build(in), fleet.KindDevice, "dcim/devices/1000"), "bmc", "endpoint") != "https://192.0.2.10:443" {
+		t.Fatal("an allowed VRF's address was not used")
+	}
+}
+
+func TestDevicesNeverShareABMCEndpoint(t *testing.T) {
+	// Two planned Devices with the same out-of-band address, as from two VRFs.
+	in := input(t)
+	in.Mapping.BMC.RoleSlugs = append(in.Mapping.BMC.RoleSlugs, "switch")
+	device(in, 1007).OOBIP = &netbox.IPAddressRef{ID: 9000}
+	p := plan.Build(in)
+	server, sw := candidate(t, p, fleet.KindDevice, "dcim/devices/1000"), candidate(t, p, fleet.KindDevice, "dcim/devices/1007")
+	for _, c := range []*plan.Candidate{server, sw} {
+		if c.Action != plan.ActionQuarantined || c.Reason != plan.ReasonBMCCollision ||
+			!strings.Contains(c.Message, server.Name) || !strings.Contains(c.Message, sw.Name) {
+			t.Fatalf("%s %+v", c.Source, c)
+		}
+	}
+
+	// An existing Device from another writer with the same endpoint.
+	other := object(fleet.KindDevice, "operator-recorded", map[string]any{
+		"claimRef": map[string]any{"name": "operator-slot"}, "identity": map[string]any{"model": "x", "serial": "OTHER"},
+		"bmc": map[string]any{"endpoint": "https://192.0.2.10:443"},
+	}, nil)
+	c := candidate(t, plan.Build(withExisting(input(t), other)), fleet.KindDevice, "dcim/devices/1000")
+	if c.Reason != plan.ReasonBMCCollision || !strings.Contains(c.Message, "operator-recorded") || !strings.Contains(c.Message, c.Name) {
+		t.Fatalf("%+v", c)
 	}
 }
 
@@ -364,5 +424,80 @@ func TestBMCIsWrittenOnlyForListedRolesWithHardwareIdentity(t *testing.T) {
 	sw := candidate(t, plan.Build(in), fleet.KindDevice, "dcim/devices/1007")
 	if field(t, sw, "bmc") != nil || !strings.Contains(sw.Message, "IPv6") || sw.Action != plan.ActionCreate {
 		t.Fatalf("IPv6 bmc %v message %q", field(t, sw, "bmc"), sw.Message)
+	}
+}
+
+func TestComponentsThatCannotBeRecordedExactly(t *testing.T) {
+	for name, mutate := range map[string]func(*plan.Input){
+		"more than 256 components": func(in *plan.Input) {
+			for i := int64(0); i < 254; i++ {
+				addComponent(*in, netbox.CollectionInterfaces, netbox.Component{ID: 20000 + i, Device: &netbox.Ref{ID: 1000}, Name: "extra", Type: &netbox.Choice{Value: "1000base-t"}})
+			}
+		},
+		"a name longer than Fleet allows": func(in *plan.Input) {
+			addComponent(*in, netbox.CollectionInterfaces, netbox.Component{ID: 20000, Device: &netbox.Ref{ID: 1000}, Name: strings.Repeat("n", 254)})
+		},
+		"an outlet fed by another device's power port": func(in *plan.Input) {
+			addComponent(*in, netbox.CollectionPowerOutlets, netbox.Component{ID: 20000, Device: &netbox.Ref{ID: 1000}, Name: "outlet", PowerPort: &netbox.Ref{ID: 3010}})
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			in := input(t)
+			mutate(&in)
+			got := outcomes(plan.Build(in))
+			if got["record dcim/devices/1000"].reason != plan.ReasonComponentsInvalid || got["DeviceClaim dcim/devices/1000"].action != plan.ActionCreate {
+				t.Fatalf("device %+v claim %+v", got["record dcim/devices/1000"], got["DeviceClaim dcim/devices/1000"])
+			}
+		})
+	}
+	// Exactly 256 components, its three plus 253, is still within the limit.
+	in := input(t)
+	for i := int64(0); i < 253; i++ {
+		addComponent(in, netbox.CollectionInterfaces, netbox.Component{ID: 20000 + i, Device: &netbox.Ref{ID: 1000}, Name: "extra", Type: &netbox.Choice{Value: "1000base-t"}})
+	}
+	if got := outcomes(plan.Build(in))["Device dcim/devices/1000"]; got.action != plan.ActionCreate {
+		t.Fatalf("256 components: %+v", got)
+	}
+}
+
+func TestPowerFeedRackMustBeInThePanelsFacility(t *testing.T) {
+	in := input(t)
+	// The panel moves to a location mapped to another Facility.
+	in.Snapshot.PowerPanels[0].Location = nil
+	in.Snapshot.PowerPanels[0].Site = &netbox.Ref{ID: 2}
+	in.Mapping.Facilities = append(in.Mapping.Facilities, netboxv1alpha1.FacilityMapping{SourceType: netboxv1alpha1.PremisesSourceSite, SourceID: 2, FacilityRef: netboxv1alpha1.LocalObjectReference{Name: "example-premises-b"}})
+	in.Existing[fleet.KindFacility] = append(in.Existing[fleet.KindFacility], facility("example-premises-b"))
+	got := outcomes(plan.Build(in))
+	if got["record dcim/power-feeds/6000"].reason != plan.ReasonRackFacilityMismatch {
+		t.Fatalf("feed %+v", got["record dcim/power-feeds/6000"])
+	}
+	if got["record dcim/cables/5002"].reason != plan.ReasonEndpointUnavailable {
+		t.Fatalf("cable %+v", got["record dcim/cables/5002"])
+	}
+}
+
+func TestTurningOnOrFixingABMCUpdatesOwnedDevices(t *testing.T) {
+	// Imported before the mapping listed any BMC role.
+	before := input(t)
+	before.Mapping.BMC = nil
+	var objs []unstructured.Unstructured
+	for _, c := range plan.Build(before).Candidates {
+		objs = append(objs, *applied(c.Object.DeepCopy()))
+	}
+	p := plan.Build(withExisting(input(t), objs...))
+	server := candidate(t, p, fleet.KindDevice, "dcim/devices/1000")
+	if server.Action != plan.ActionUpdate || field(t, server, "bmc", "endpoint") != "https://192.0.2.10:443" {
+		t.Fatalf("turning on bmc: %+v", server)
+	}
+	if got := outcomes(p)["DeviceClaim dcim/devices/1000"]; got.action != plan.ActionUnchanged {
+		t.Fatalf("the claim is unaffected: %+v", got)
+	}
+
+	// A later fix to the address in NetBox.
+	in := input(t)
+	in.Snapshot.IPAddresses[0].Address = "192.0.2.20/24"
+	server = candidate(t, plan.Build(withExisting(in, previous(t)...)), fleet.KindDevice, "dcim/devices/1000")
+	if server.Action != plan.ActionUpdate || field(t, server, "bmc", "endpoint") != "https://192.0.2.20:443" {
+		t.Fatalf("fixing the endpoint: %+v", server)
 	}
 }

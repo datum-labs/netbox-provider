@@ -4,6 +4,9 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
+	"go.miloapis.com/netbox-provider/internal/plan"
+	"k8s.io/apimachinery/pkg/runtime"
 	"os"
 	"path/filepath"
 	"sync"
@@ -84,17 +87,19 @@ func newSource(namespace, url string, mode netboxv1alpha1.SourceMode) *netboxv1a
 	}
 }
 
-// writeRecorder fails the test on any Fleet write other than Create and
-// counts creates.
+// writeRecorder fails the test on any Fleet write other than a server-side
+// apply by plan.FieldManager without force, and records every apply. There is
+// no Create, Update, non-apply Patch, Delete, or status write.
 type writeRecorder struct {
 	mu      sync.Mutex
-	creates []string
+	applies []string
 }
 
-func (w *writeRecorder) Creates() []string {
+// Applies returns Kind/name for every apply, in order.
+func (w *writeRecorder) Applies() []string {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return append([]string{}, w.creates...)
+	return append([]string{}, w.applies...)
 }
 
 func recordingFleetClient(rec *writeRecorder) client.Client {
@@ -106,17 +111,41 @@ func recordingFleetClient(rec *writeRecorder) client.Client {
 	c, err := client.NewWithWatch(cfg, client.Options{})
 	Expect(err).NotTo(HaveOccurred())
 	return interceptor.NewClient(c, interceptor.Funcs{
-		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+		Apply: func(ctx context.Context, c client.WithWatch, obj runtime.ApplyConfiguration, opts ...client.ApplyOption) error {
+			applyOpts := &client.ApplyOptions{}
+			applyOpts.ApplyOptions(opts)
+			if applyOpts.Force != nil && *applyOpts.Force {
+				return forbid("force ownership of")
+			}
+			if applyOpts.FieldManager != plan.FieldManager {
+				return forbid("apply with a field manager other than " + plan.FieldManager + " to")
+			}
+			data, err := json.Marshal(obj)
+			Expect(err).NotTo(HaveOccurred())
+			var meta struct {
+				Kind     string `json:"kind"`
+				Metadata struct {
+					Name string `json:"name"`
+				} `json:"metadata"`
+				Status any `json:"status"`
+			}
+			Expect(json.Unmarshal(data, &meta)).To(Succeed())
+			if meta.Status != nil {
+				return forbid("apply status to")
+			}
 			rec.mu.Lock()
-			rec.creates = append(rec.creates, obj.GetObjectKind().GroupVersionKind().Kind+"/"+obj.GetName())
+			rec.applies = append(rec.applies, meta.Kind+"/"+meta.Metadata.Name)
 			rec.mu.Unlock()
-			return c.Create(ctx, obj, opts...)
+			return c.Apply(ctx, obj, opts...)
+		},
+		Create: func(context.Context, client.WithWatch, client.Object, ...client.CreateOption) error {
+			return forbid("create (rather than apply)")
 		},
 		Update: func(context.Context, client.WithWatch, client.Object, ...client.UpdateOption) error {
 			return forbid("update")
 		},
 		Patch: func(context.Context, client.WithWatch, client.Object, client.Patch, ...client.PatchOption) error {
-			return forbid("patch")
+			return forbid("patch (rather than apply)")
 		},
 		Delete: func(context.Context, client.WithWatch, client.Object, ...client.DeleteOption) error {
 			return forbid("delete")
@@ -129,6 +158,9 @@ func recordingFleetClient(rec *writeRecorder) client.Client {
 		},
 		SubResourcePatch: func(context.Context, client.Client, string, client.Object, client.Patch, ...client.SubResourcePatchOption) error {
 			return forbid("patch the status of")
+		},
+		SubResourceApply: func(context.Context, client.Client, string, runtime.ApplyConfiguration, ...client.SubResourceApplyOption) error {
+			return forbid("apply the status of")
 		},
 	})
 }

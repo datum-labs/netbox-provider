@@ -2,14 +2,18 @@
 
 A Kubernetes controller that imports physical inventory from NetBox into Fleet.
 It reads NetBox, compares it with the Fleet inventory records that already
-exist, and reports a plan. When you opt in, it creates the records that are
-missing. It never changes, adopts or deletes an existing record.
+exist, and reports a plan. When you opt in, it writes the plan by server-side
+apply as field manager `netbox-provider`: it creates missing records and
+updates the fields it owns when NetBox changes them. It never forces ownership,
+adopts a record it did not apply, changes an immutable field, or deletes a
+record.
 
 Fleet does not know this controller or NetBox exists. Fleet sees ordinary
 inventory records holding only physical facts; this controller correlates them
 with NetBox through its own `netbox.miloapis.com/*` labels and annotations. It
 targets Fleet's inventory schema without authorship fields (datum-cloud/fleet#106)
-and the create-only importer role (#101).
+and, for writes, `create` and `patch` on the inventory kinds (Fleet's importer
+role, #101, grants only `create`; see [Fleet usage](docs/architecture/fleet-contract.md)).
 
 Generated from [`milo-os/controller-template`](https://github.com/milo-os/controller-template)
 (kubebuilder v4). Tested against a synthetic NetBox and Fleet's vendored CRD
@@ -32,12 +36,14 @@ Each Fleet record in the plan gets one outcome:
 | Outcome | Meaning |
 | --- | --- |
 | Create | Missing from Fleet and safe to create. |
-| Unchanged | Already in Fleet from this source with the same facts. |
-| Quarantined | Conflicts with an existing record, such as a name owned by another writer or a matching serial. Nothing is written. |
+| Update | Applied by this controller before; a field it owns now differs from NetBox and is re-applied. |
+| Unchanged | Already applied by this controller with the same facts. Nothing is sent. |
+| Quarantined | Conflicts with existing state: a name or field owned by another writer, a matching serial or BMC endpoint, or a change to a field Fleet keeps immutable. Nothing is written. |
 | Unresolved | Needs a mapping decision, or depends on something blocked. |
 
 In the default `Observe` mode nothing is written. Set `spec.mode: Create` to
-create the planned records: racks first, then device claims, then devices. The
+apply the plan: racks first, then power feeds, device claims, devices and
+cables. The
 status lists conflicts first and never contains serials or tokens. Any failed
 or uncertain read or write is reported as `Unknown`, never `Ready`.
 
@@ -47,7 +53,7 @@ imported.
 
 Read the [design](docs/architecture/design.md) for the full rules, and the
 [Fleet usage](docs/architecture/fleet-contract.md) for exactly what it writes
-and the one Fleet dependency, the create-only importer role.
+and the Milo permissions it needs.
 
 ## Deploy
 

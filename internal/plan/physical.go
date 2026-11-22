@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"strconv"
 	"strings"
 
@@ -27,6 +29,8 @@ const (
 	ReasonInvalidPowerCable     = "InvalidPowerCable"
 	ReasonMixedEndpoints        = "MixedEndpoints"
 	ReasonCableMediumUnreviewed = "CableMediumUnreviewed"
+	ReasonRackFacilityMismatch  = "RackFacilityMismatch"
+	ReasonBMCCollision          = "BMCEndpointCollision"
 )
 
 // Source record types for power feeds and cables.
@@ -236,28 +240,46 @@ func (b *builder) frontPortMappings(device int64, p *deviceParts, record netbox.
 // on 443, and Fleet's Redfish executor requires the port to be explicit.
 const bmcPort = "443"
 
+// reservedIPv4 are IPv4 ranges that can never be a BMC address: "this
+// network" (0.0.0.0/8) and the reserved block 240.0.0.0/4, which includes the
+// limited broadcast address 255.255.255.255. Loopback, link-local and
+// multicast addresses are rejected as well.
+var reservedIPv4 = []netip.Prefix{netip.MustParsePrefix("0.0.0.0/8"), netip.MustParsePrefix("240.0.0.0/4")}
+
 // bmcEndpoint returns https://<IPv4>:443 from a device's NetBox out-of-band
 // IP, or why there is none. Fleet's Redfish executor accepts only a literal
-// IPv4 endpoint, so an IPv6 address is not written.
-func bmcEndpoint(device netbox.Device) (string, string) {
-	if device.OOBIP == nil || device.OOBIP.Address == "" {
+// IPv4 endpoint, so an IPv6 address is not written. An address in a VRF the
+// mapping does not allow is never treated as global.
+func bmcEndpoint(device netbox.Device, ips map[int64]netbox.IPAddress, vrfs map[int64]bool) (string, string) {
+	if device.OOBIP == nil || device.OOBIP.ID == 0 {
 		return "", "NetBox records no out-of-band IP"
 	}
-	address := device.OOBIP.Address
+	ip, ok := ips[device.OOBIP.ID]
+	if !ok {
+		return "", "the out-of-band IP record is not in the snapshot"
+	}
+	if ip.VRF != nil && !vrfs[ip.VRF.ID] {
+		return "", fmt.Sprintf("the out-of-band IP is in NetBox VRF %d, which the mapping does not allow; it is never treated as global", ip.VRF.ID)
+	}
 	var addr netip.Addr
-	if prefix, err := netip.ParsePrefix(address); err == nil {
+	if prefix, err := netip.ParsePrefix(ip.Address); err == nil {
 		addr = prefix.Addr()
-	} else if a, err := netip.ParseAddr(address); err == nil {
+	} else if a, err := netip.ParseAddr(ip.Address); err == nil {
 		addr = a
 	} else {
 		return "", "the out-of-band IP is not an IP address"
 	}
 	addr = addr.Unmap()
-	switch {
-	case !addr.Is4():
+	if !addr.Is4() {
 		return "", "the out-of-band IP is IPv6; Fleet's Redfish executor accepts only IPv4"
-	case addr.IsUnspecified() || addr.IsLoopback() || addr.IsMulticast() || addr.IsLinkLocalUnicast():
+	}
+	if addr.IsLoopback() || addr.IsMulticast() || addr.IsLinkLocalUnicast() {
 		return "", "the out-of-band IP is not a usable unicast address"
+	}
+	for _, reserved := range reservedIPv4 {
+		if reserved.Contains(addr) {
+			return "", "the out-of-band IP is in reserved range " + reserved.String()
+		}
 	}
 	return "https://" + net.JoinHostPort(addr.String(), bmcPort), ""
 }
@@ -329,6 +351,11 @@ func (b *builder) powerFeeds() {
 			rack, ok := b.rackByID[feed.Rack.ID]
 			if !ok {
 				b.record(source, netboxv1alpha1.RecordStateUnresolved, ReasonDependencyBlocked, "the feed's rack is not in the snapshot or is unresolved")
+				continue
+			}
+			if rackFacility, _, _ := unstructured.NestedString(rack.Object.Object, "spec", "facilityRef", "name"); rackFacility != facility {
+				b.record(source, netboxv1alpha1.RecordStateUnresolved, ReasonRackFacilityMismatch,
+					fmt.Sprintf("the feed's power panel is in Facility %q but its rack is in %q", facility, rackFacility))
 				continue
 			}
 			spec.RackRef = &fleet.LocalReference{Name: rack.Name}
