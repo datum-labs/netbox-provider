@@ -31,6 +31,19 @@ spec:
       classification: Physical
       serialMeaning: Chassis
       placement: RackMembership
+    - id: 1007
+      classification: Physical
+      serialMeaning: Chassis
+      placement: RackUnits
+    - id: 1008
+      classification: Physical
+      serialMeaning: Chassis
+      placement: RackMembership
+  bmc:
+    roleSlugs: [server]
+  cableMedia:
+    - cableTypes: [dac-passive, cat6]
+      medium: Copper
   exclusions:
     - roleSlugs: [hosted-vm]
       reason: hosted virtual machines recorded in DCIM are not physical assets

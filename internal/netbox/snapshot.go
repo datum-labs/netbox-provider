@@ -101,6 +101,26 @@ type Device struct {
 	Rack       *Ref     `json:"rack,omitempty"`
 	Serial     string   `json:"serial,omitempty"`
 	AssetTag   string   `json:"asset_tag,omitempty"`
+	// Position is the lowest rack unit the device occupies, and Face the
+	// rack face it is mounted on.
+	Position *Decimal `json:"position,omitempty"`
+	Face     *Choice  `json:"face,omitempty"`
+	// OOBIP is the device's out-of-band management address.
+	OOBIP *IPAddressRef `json:"oob_ip,omitempty"`
+}
+
+// IPAddressRef is a nested ipam/ip-addresses reference. NetBox's nested form
+// carries no VRF, so the full record is read from ipam/ip-addresses.
+type IPAddressRef struct {
+	ID      int64  `json:"id,omitempty"`
+	Address string `json:"address,omitempty"`
+}
+
+// IPAddress is an ipam/ip-addresses record. VRF is nil in the global table.
+type IPAddress struct {
+	ID      int64  `json:"id"`
+	Address string `json:"address,omitempty"`
+	VRF     *Ref   `json:"vrf,omitempty"`
 }
 
 // UnmarshalJSON accepts both role field names and null strings.
@@ -141,6 +161,14 @@ type Snapshot struct {
 	Racks       []Rack       `json:"racks"`
 	DeviceTypes []DeviceType `json:"deviceTypes"`
 	Devices     []Device     `json:"devices"`
+	// Components holds each component collection's records, keyed by
+	// collection.
+	Components  map[string][]Component `json:"components"`
+	Cables      []Cable                `json:"cables"`
+	PowerPanels []PowerPanel           `json:"powerPanels"`
+	PowerFeeds  []PowerFeed            `json:"powerFeeds"`
+	// IPAddresses are the devices' out-of-band IP records.
+	IPAddresses []IPAddress `json:"ipAddresses"`
 }
 
 // Digest is the sha256 of the canonical JSON of the retained fields.
@@ -152,13 +180,21 @@ func (s *Snapshot) Digest() string {
 
 // Counts returns the number of records per collection.
 func (s *Snapshot) Counts() map[string]int32 {
-	return map[string]int32{
+	counts := map[string]int32{
 		CollectionSites:       int32(len(s.Sites)),
 		CollectionLocations:   int32(len(s.Locations)),
 		CollectionRacks:       int32(len(s.Racks)),
 		CollectionDeviceTypes: int32(len(s.DeviceTypes)),
 		CollectionDevices:     int32(len(s.Devices)),
+		CollectionCables:      int32(len(s.Cables)),
+		CollectionPowerPanels: int32(len(s.PowerPanels)),
+		CollectionPowerFeeds:  int32(len(s.PowerFeeds)),
+		CollectionIPAddresses: int32(len(s.IPAddresses)),
 	}
+	for _, collection := range ComponentCollections {
+		counts[collection] = int32(len(s.Components[collection]))
+	}
+	return counts
 }
 
 // Scope narrows a snapshot to NetBox sites.
@@ -185,7 +221,7 @@ type Reader interface {
 // Snapshot reads every supported collection, sequentially. Any failure
 // returns an error and no snapshot.
 func (c *Client) Snapshot(ctx context.Context, scope Scope, now time.Time) (*Snapshot, error) {
-	snapshot := &Snapshot{ObservedAt: now.UTC().Truncate(time.Second)}
+	snapshot := &Snapshot{ObservedAt: now.UTC().Truncate(time.Second), Components: map[string][]Component{}}
 	steps := []struct {
 		collection string
 		filter     url.Values
@@ -206,6 +242,31 @@ func (c *Client) Snapshot(ctx context.Context, scope Scope, now time.Time) (*Sna
 			return
 		}},
 	}
+	for _, collection := range ComponentCollections {
+		steps = append(steps, struct {
+			collection string
+			filter     url.Values
+			decode     func([]json.RawMessage) error
+		}{collection, scope.filter("site_id"), func(raw []json.RawMessage) (err error) {
+			snapshot.Components[collection], err = decodeAll[Component](raw)
+			return
+		}})
+	}
+	steps = append(steps, []struct {
+		collection string
+		filter     url.Values
+		decode     func([]json.RawMessage) error
+	}{
+		{CollectionPowerPanels, scope.filter("site_id"), func(raw []json.RawMessage) (err error) {
+			snapshot.PowerPanels, err = decodeAll[PowerPanel](raw)
+			return
+		}},
+		{CollectionPowerFeeds, scope.filter("site_id"), func(raw []json.RawMessage) (err error) {
+			snapshot.PowerFeeds, err = decodeAll[PowerFeed](raw)
+			return
+		}},
+		{CollectionCables, scope.filter("site_id"), func(raw []json.RawMessage) (err error) { snapshot.Cables, err = decodeAll[Cable](raw); return }},
+	}...)
 	for _, step := range steps {
 		raw, err := c.List(ctx, step.collection, step.filter)
 		if err != nil {
@@ -215,8 +276,29 @@ func (c *Client) Snapshot(ctx context.Context, scope Scope, now time.Time) (*Sna
 			return nil, fmt.Errorf("%s: %w", step.collection, err)
 		}
 	}
+	// Out-of-band IP records are read by ID, a bounded number per request.
+	var ids []string
+	for _, d := range snapshot.Devices {
+		if d.OOBIP != nil && d.OOBIP.ID > 0 {
+			ids = append(ids, strconv.FormatInt(d.OOBIP.ID, 10))
+		}
+	}
+	for start := 0; start < len(ids); start += ipAddressBatch {
+		raw, err := c.List(ctx, CollectionIPAddresses, url.Values{"id": ids[start:min(start+ipAddressBatch, len(ids))]})
+		if err != nil {
+			return nil, err
+		}
+		batch, err := decodeAll[IPAddress](raw)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", CollectionIPAddresses, err)
+		}
+		snapshot.IPAddresses = append(snapshot.IPAddresses, batch...)
+	}
 	return snapshot, nil
 }
+
+// ipAddressBatch bounds the IDs in one ipam/ip-addresses request.
+const ipAddressBatch = 100
 
 func decodeAll[T any](raw []json.RawMessage) ([]T, error) {
 	out := make([]T, 0, len(raw))

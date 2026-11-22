@@ -32,10 +32,19 @@ type Limits struct {
 	Pages int
 	// Records bounds the number of records in one collection.
 	Records int
+	// CollectionTimeout bounds the whole read of one collection. Each
+	// request is also bounded by RequestTimeout.
+	CollectionTimeout time.Duration
 }
 
 // DefaultLimits are the production bounds.
-var DefaultLimits = Limits{PageBytes: 4 << 20, CollectionBytes: 64 << 20, Pages: 1000, Records: 20000}
+var DefaultLimits = Limits{PageBytes: 4 << 20, CollectionBytes: 64 << 20, Pages: 1000, Records: 20000, CollectionTimeout: 2 * time.Minute}
+
+// PagesFor returns a page bound that allows records at PageSize per page,
+// and never less than the default.
+func PagesFor(records int) int {
+	return max(DefaultLimits.Pages, records/PageSize+1)
+}
 
 // PageSize is the requested page size.
 const PageSize = 200
@@ -130,6 +139,11 @@ func (c *Client) List(ctx context.Context, collection string, filter url.Values)
 		if reservedQueryKey(key) {
 			return nil, fmt.Errorf("%w: filter may not set %q", ErrInvalidConfig, key)
 		}
+	}
+	if c.limits.CollectionTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, c.limits.CollectionTimeout)
+		defer cancel()
 	}
 	endpoint := c.collectionURL(collection)
 	current := *endpoint
@@ -336,8 +350,9 @@ func reservedQueryKey(key string) bool {
 
 func validCollection(collection string) bool {
 	switch collection {
-	case CollectionSites, CollectionLocations, CollectionRacks, CollectionDeviceTypes, CollectionDevices:
+	case CollectionSites, CollectionLocations, CollectionRacks, CollectionDeviceTypes, CollectionDevices,
+		CollectionCables, CollectionPowerPanels, CollectionPowerFeeds, CollectionIPAddresses:
 		return true
 	}
-	return false
+	return slices.Contains(ComponentCollections, collection)
 }

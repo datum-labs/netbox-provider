@@ -297,14 +297,40 @@ func TestSnapshotAllowlistsFieldsAndIsStable(t *testing.T) {
 		t.Fatalf("observedAt %v", first.ObservedAt)
 	}
 	encoded, _ := json.Marshal(first)
-	for _, forbidden := range []string{"must-not-be-retained", "synthetic comment", "https://", "position", "status"} {
+	for _, forbidden := range []string{"must-not-be-retained", "synthetic comment", "https://", "1000BASE-T", "\"Front\"", "mac_address", "comments"} {
 		if strings.Contains(string(encoded), forbidden) {
 			t.Errorf("snapshot retained non-allowlisted content %q", forbidden)
 		}
 	}
 	counts := first.Counts()
-	if counts[netbox.CollectionDevices] != 7 || counts[netbox.CollectionRacks] != 2 || counts[netbox.CollectionDeviceTypes] != 3 {
+	if counts[netbox.CollectionDevices] != 9 || counts[netbox.CollectionRacks] != 2 || counts[netbox.CollectionDeviceTypes] != 5 ||
+		counts[netbox.CollectionInterfaces] != 11 || counts[netbox.CollectionPowerOutlets] != 2 || counts[netbox.CollectionCables] != 9 ||
+		counts[netbox.CollectionPowerFeeds] != 3 || counts[netbox.CollectionPowerPanels] != 1 || counts[netbox.CollectionRearPorts] != 1 || counts[netbox.CollectionFrontPorts] != 1 {
 		t.Fatalf("counts %v", counts)
+	}
+	outlet := first.Components[netbox.CollectionPowerOutlets][0]
+	if outlet.Device == nil || outlet.Device.ID != 1008 || outlet.PowerPort == nil || outlet.PowerPort.ID != 3010 || netbox.ChoiceValue(outlet.Type) != "iec-60320-c13" {
+		t.Errorf("power outlet decoded as %+v", outlet)
+	}
+	front := first.Components[netbox.CollectionFrontPorts][0]
+	if len(front.RearPorts) != 2 || front.RearPorts[0].RearPort == nil || *front.RearPorts[0].RearPort != 2100 ||
+		front.RearPorts[1].RearPort == nil || *front.RearPorts[1].RearPort != 2100 || *front.RearPorts[1].Position != 2 {
+		t.Errorf("front port rear mappings decoded as %+v", front.RearPorts)
+	}
+	if counts[netbox.CollectionIPAddresses] != 3 || first.IPAddresses[0].ID != 9000 || first.IPAddresses[0].VRF != nil {
+		t.Errorf("out-of-band IP records %+v", first.IPAddresses)
+	}
+	cable := first.Cables[0]
+	if cable.Type != "dac-passive" || netbox.ChoiceValue(cable.Status) != "connected" || len(cable.ATerminations) != 1 ||
+		cable.ATerminations[0] != (netbox.Termination{ObjectType: "dcim.interface", ObjectID: 2001}) {
+		t.Errorf("cable decoded as %+v", cable)
+	}
+	if first.Cables[1].Type != "" {
+		t.Error("a null cable type was not decoded as empty")
+	}
+	feed := first.PowerFeeds[0]
+	if feed.PowerPanel == nil || feed.PowerPanel.ID != 7000 || netbox.ChoiceValue(feed.Supply) != "ac" || feed.Voltage == nil || *feed.Voltage != 208 {
+		t.Errorf("power feed decoded as %+v", feed)
 	}
 	byID := map[int64]netbox.Device{}
 	for _, d := range first.Devices {
@@ -326,7 +352,7 @@ func TestSnapshotAllowlistsFieldsAndIsStable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(scoped.Sites) != 1 || len(scoped.Devices) != 1 || len(scoped.Racks) != 1 || len(scoped.DeviceTypes) != 3 {
+	if len(scoped.Sites) != 1 || len(scoped.Devices) != 1 || len(scoped.Racks) != 1 || len(scoped.DeviceTypes) != 5 {
 		t.Fatalf("scope not applied: sites=%d devices=%d racks=%d", len(scoped.Sites), len(scoped.Devices), len(scoped.Racks))
 	}
 	for _, auth := range server.Authorizations() {
@@ -347,5 +373,25 @@ func TestSnapshotFailsWhollyOnAnyCollectionError(t *testing.T) {
 	snapshot, err := newClient(t, server.Server, server.RootURL(), netbox.Limits{}).Snapshot(context.Background(), netbox.Scope{}, time.Now())
 	if err == nil || snapshot != nil || strings.Contains(err.Error(), "sensitive") {
 		t.Fatalf("snapshot=%v err=%v", snapshot, err)
+	}
+}
+
+func TestCollectionTimeoutBoundsEachCollection(t *testing.T) {
+	server := newTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(300 * time.Millisecond)
+		_, _ = fmt.Fprint(w, `{"count":1,"next":null,"results":[{"id":1}]}`)
+	}))
+	defer server.Close()
+	limits := netbox.DefaultLimits
+	limits.CollectionTimeout = 100 * time.Millisecond
+	if _, err := newClient(t, server, server.URL, limits).List(context.Background(), netbox.CollectionDevices, nil); err == nil {
+		t.Fatal("a collection read outlived its timeout")
+	}
+	limits.CollectionTimeout = 5 * time.Second
+	if records, err := newClient(t, server, server.URL, limits).List(context.Background(), netbox.CollectionDevices, nil); err != nil || len(records) != 1 {
+		t.Fatalf("records %d err %v", len(records), err)
+	}
+	if netbox.PagesFor(20000) != netbox.DefaultLimits.Pages || netbox.PagesFor(1000000) != 5001 {
+		t.Fatalf("pages %d %d", netbox.PagesFor(20000), netbox.PagesFor(1000000))
 	}
 }

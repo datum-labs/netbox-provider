@@ -2,14 +2,19 @@
 
 A Kubernetes controller that imports physical inventory from NetBox into Fleet.
 It reads NetBox, compares it with the Fleet inventory records that already
-exist, and reports a plan. When you opt in, it creates the records that are
-missing. It never changes, adopts or deletes an existing record.
+exist, and reports a plan. When you opt in, it writes the plan by server-side
+apply as field manager `netbox-provider`: it creates missing records and
+updates the fields it owns when NetBox changes them. It never forces ownership,
+adopts a record it did not apply, changes an immutable field, or deletes a
+record.
 
 Fleet does not know this controller or NetBox exists. Fleet sees ordinary
 inventory records holding only physical facts; this controller correlates them
 with NetBox through its own `netbox.miloapis.com/*` labels and annotations. It
-targets Fleet's inventory schema without authorship fields (datum-cloud/fleet#105
-and #106) and needs the create-only importer role (#101).
+targets Fleet's inventory schema without authorship fields (datum-cloud/fleet#106)
+and, for writes, `create` and `patch` on the inventory kinds, which Fleet's
+importer role grants (#101, with `patch` added by #134; see
+[Fleet usage](docs/architecture/fleet-contract.md)).
 
 Generated from [`milo-os/controller-template`](https://github.com/milo-os/controller-template)
 (kubebuilder v4). Tested against a synthetic NetBox and Fleet's vendored CRD
@@ -32,21 +37,24 @@ Each Fleet record in the plan gets one outcome:
 | Outcome | Meaning |
 | --- | --- |
 | Create | Missing from Fleet and safe to create. |
-| Unchanged | Already in Fleet from this source with the same facts. |
-| Quarantined | Conflicts with an existing record, such as a name owned by another writer or a matching serial. Nothing is written. |
+| Update | Applied by this controller before; a field it owns now differs from NetBox and is re-applied. |
+| Unchanged | Already applied by this controller with the same facts. Nothing is sent. |
+| Quarantined | Conflicts with existing state: a name or field owned by another writer, a matching serial or BMC endpoint, or a change to a field Fleet keeps immutable. Nothing is written. |
 | Unresolved | Needs a mapping decision, or depends on something blocked. |
 
 In the default `Observe` mode nothing is written. Set `spec.mode: Create` to
-create the planned records: racks first, then device claims, then devices. The
+apply the plan: racks first, then power feeds, device claims, devices and
+cables. The
 status lists conflicts first and never contains serials or tokens. Any failed
 or uncertain read or write is reported as `Unknown`, never `Ready`.
 
-It imports racks, device claims and devices. Facilities stay operator-owned.
-Cables, power, components, circuits and Sites are not imported yet.
+It imports racks, power feeds, device claims, devices with their components,
+and cables. Facilities stay operator-owned. Circuits and Sites are not
+imported.
 
 Read the [design](docs/architecture/design.md) for the full rules, and the
 [Fleet usage](docs/architecture/fleet-contract.md) for exactly what it writes
-and the one Fleet dependency, the create-only importer role.
+and the Milo permissions it needs.
 
 ## Deploy
 
@@ -58,9 +66,11 @@ NetBoxMappings described in [config/README.md](config/README.md). Fleet records
 are written through Milo IAM in the provider project, never local RBAC.
 
 Records carry only physical facts; the link to NetBox is in this controller's
-labels and annotations. A Device is created only when its NetBox serial is a
-reviewed chassis serial; otherwise its DeviceClaim is created and the Device is
-reported Unresolved.
+labels and annotations. A Device records its NetBox serial only when the
+mapping says it is a chassis serial. Otherwise it is recorded with Fleet's
+unidentified marker (datum-cloud/fleet#110), so it can be cabled but never
+enrolled as capacity. A provider-hosted server, whose serial is a provider host
+ID, gets only its DeviceClaim.
 
 Review a source's plan in Observe mode first; use a dedicated NetBox account
 with a read-only token. When the plan is what you expect, opt in:

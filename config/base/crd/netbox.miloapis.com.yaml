@@ -47,6 +47,74 @@ spec:
             description: NetBoxMappingSpec is the reviewed interpretation of a NetBox
               source.
             properties:
+              bmc:
+                description: |-
+                  BMC writes Device.spec.bmc.endpoint as https://<IPv4>:443 from the
+                  device's NetBox out-of-band IP, for Devices with a chassis serial whose
+                  role is listed. A device without a usable IPv4 out-of-band IP gets no
+                  BMC; the Device is still created. Unset writes no BMC.
+                properties:
+                  roleSlugs:
+                    description: |-
+                      RoleSlugs are the NetBox device roles whose out-of-band IP is a
+                      Redfish BMC, such as servers. Other devices' out-of-band IPs, for
+                      example a switch's management address, are never written as a BMC.
+                    items:
+                      maxLength: 100
+                      minLength: 1
+                      type: string
+                    maxItems: 64
+                    minItems: 1
+                    type: array
+                    x-kubernetes-list-type: set
+                  vrfIDs:
+                    description: |-
+                      VRFIDs are NetBox VRFs whose out-of-band IPs may be used. An address in
+                      the global table (no VRF) is always usable; an address in any other VRF
+                      is never treated as global, and writes no BMC.
+                    items:
+                      format: int64
+                      minimum: 1
+                      type: integer
+                    maxItems: 64
+                    type: array
+                    x-kubernetes-list-type: set
+                required:
+                - roleSlugs
+                type: object
+              cableMedia:
+                description: |-
+                  CableMedia gives the reviewed medium of data cables by NetBox cable
+                  type. Power and console cables take their medium from the components
+                  they connect. A data cable whose type has no rule stays unresolved.
+                items:
+                  description: CableMediumRule gives the medium of data cables of
+                    some NetBox cable types.
+                  properties:
+                    cableTypes:
+                      description: CableTypes are NetBox cable type values, such as
+                        cat6 or smf.
+                      items:
+                        maxLength: 64
+                        minLength: 1
+                        type: string
+                      maxItems: 64
+                      minItems: 1
+                      type: array
+                      x-kubernetes-list-type: set
+                    medium:
+                      description: Medium is the Fleet medium of those cables.
+                      enum:
+                      - Copper
+                      - Fiber
+                      - Unknown
+                      type: string
+                  required:
+                  - cableTypes
+                  - medium
+                  type: object
+                maxItems: 64
+                type: array
               devices:
                 description: |-
                   Devices holds per-device reviewed decisions. Unlisted devices stay
@@ -71,6 +139,7 @@ spec:
                       enum:
                       - Facility
                       - RackMembership
+                      - RackUnits
                       type: string
                     reason:
                       description: Reason explains an exclusion.
@@ -180,6 +249,15 @@ spec:
                 maxLength: 253
                 minLength: 1
                 type: string
+              untypedCableMedium:
+                description: |-
+                  UntypedCableMedium is the medium of data cables that have no NetBox
+                  cable type. When unset, they stay unresolved.
+                enum:
+                - Copper
+                - Fiber
+                - Unknown
+                type: string
             required:
             - revision
             type: object
@@ -278,6 +356,37 @@ spec:
                 - Observe
                 - Create
                 type: string
+              readLimits:
+                description: |-
+                  ReadLimits bound each NetBox collection read. Unset fields keep their
+                  defaults.
+                properties:
+                  collectionTimeout:
+                    description: |-
+                      CollectionTimeout bounds the read of one collection. Each request is
+                      also bounded at 30 seconds. Default 2m.
+                    type: string
+                    x-kubernetes-validations:
+                    - message: collectionTimeout must be between 10s and 30m
+                      rule: duration(self) >= duration('10s') && duration(self) <=
+                        duration('30m')
+                  maxMiBPerCollection:
+                    description: |-
+                      MaxMiBPerCollection bounds the response bytes of one collection, in
+                      MiB. Each page is still bounded at 4 MiB. Default 64.
+                    format: int32
+                    maximum: 4096
+                    minimum: 1
+                    type: integer
+                  maxRecordsPerCollection:
+                    description: |-
+                      MaxRecordsPerCollection bounds the records in one collection. The page
+                      bound scales with it at 200 records per page. Default 20000.
+                    format: int32
+                    maximum: 1000000
+                    minimum: 1
+                    type: integer
+                type: object
               scope:
                 description: Scope narrows what is read from NetBox.
                 properties:
@@ -497,6 +606,12 @@ spec:
                   unsupported:
                     format: int32
                     type: integer
+                  update:
+                    format: int32
+                    type: integer
+                  updated:
+                    format: int32
+                    type: integer
                 required:
                 - create
                 - created
@@ -506,6 +621,8 @@ spec:
                 - unchanged
                 - unresolved
                 - unsupported
+                - update
+                - updated
                 type: object
               records:
                 description: Records lists notable records, conflicts first. It is
@@ -529,6 +646,8 @@ spec:
                       enum:
                       - Create
                       - Created
+                      - Update
+                      - Updated
                       - Unchanged
                       - Quarantined
                       - Unresolved

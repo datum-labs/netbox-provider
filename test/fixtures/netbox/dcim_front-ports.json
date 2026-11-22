@@ -1,0 +1,3 @@
+[
+  {"id": 2101, "device": {"id": 1007}, "name": "front1", "type": {"value": "lc"}, "positions": 2, "rear_ports": [{"position": 1, "rear_port": 2100, "rear_port_position": 1}, {"position": 2, "rear_port": {"id": 2100}, "rear_port_position": 2}], "rear_port": null, "rear_port_position": null}
+]

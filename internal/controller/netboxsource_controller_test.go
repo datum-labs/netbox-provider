@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -40,7 +41,7 @@ var _ = Describe("NetBoxSource reconcile", func() {
 		result, err := h.reconcile()
 		Expect(err).NotTo(HaveOccurred())
 		Expect(result.RequeueAfter).To(Equal(30 * time.Minute))
-		Expect(h.recorder.Creates()).To(BeEmpty())
+		Expect(h.recorder.Applies()).To(BeEmpty())
 		Expect(fleetCount(h)).To(Equal(0))
 
 		s := h.source()
@@ -49,10 +50,10 @@ var _ = Describe("NetBoxSource reconcile", func() {
 		Expect(condition(s, ConditionSourceObserved).Status).To(Equal(metav1.ConditionTrue))
 		Expect(condition(s, ConditionFleetObserved).Status).To(Equal(metav1.ConditionTrue))
 		Expect(condition(s, ConditionApplied)).To(SatisfyAll(
-			HaveField("Status", metav1.ConditionFalse), HaveField("Reason", ReasonObserveOnly), HaveField("Message", ContainSubstring("5 records would be created"))))
+			HaveField("Status", metav1.ConditionFalse), HaveField("Reason", ReasonObserveOnly), HaveField("Message", ContainSubstring("15 records would be created"))))
 		// The fixture deliberately leaves records unresolved, so review is required.
 		Expect(condition(s, ConditionReady)).To(SatisfyAll(HaveField("Status", metav1.ConditionFalse), HaveField("Reason", ReasonReviewRequired)))
-		Expect(*s.Status.Plan).To(Equal(netboxv1alpha1.PlanSummary{Create: 5, Unresolved: 6, Excluded: 1}))
+		Expect(*s.Status.Plan).To(Equal(netboxv1alpha1.PlanSummary{Create: 15, Unresolved: 10, Excluded: 3}))
 		Expect(s.Status.LastObservation.SnapshotDigest).To(HavePrefix("sha256:"))
 		Expect(s.Status.LastObservation.MappingRevision).To(Equal("example-reviewed-1"))
 		Expect(s.Status.Records[0].State).To(Equal(netboxv1alpha1.RecordStateUnresolved), "conflicts and unresolved records are listed first")
@@ -66,33 +67,48 @@ var _ = Describe("NetBoxSource reconcile", func() {
 		h := newHarness().withSourceAndToken(netboxv1alpha1.SourceModeCreate)
 		_, err := h.reconcile()
 		Expect(err).NotTo(HaveOccurred())
-		Expect(h.recorder.Creates()).To(HaveLen(5))
+		Expect(h.recorder.Applies()).To(HaveLen(15))
 		Expect(h.list(fleet.KindRack)).To(HaveLen(1))
-		Expect(h.list(fleet.KindDeviceClaim)).To(HaveLen(3))
-		Expect(h.list(fleet.KindDevice)).To(HaveLen(1), "devices without a reviewed chassis serial are not created")
+		Expect(h.list(fleet.KindPowerFeed)).To(HaveLen(1))
+		Expect(h.list(fleet.KindDeviceClaim)).To(HaveLen(5))
+		Expect(h.list(fleet.KindDevice)).To(HaveLen(4), "a provider-hosted server without a chassis serial has no Device")
+		Expect(h.list(fleet.KindCable)).To(HaveLen(4), "cables are created only between created records")
 		s := h.source()
 		Expect(condition(s, ConditionApplied)).To(SatisfyAll(HaveField("Status", metav1.ConditionTrue), HaveField("Reason", ReasonApplied)))
-		Expect(s.Status.Plan.Created).To(Equal(int32(5)))
+		Expect(s.Status.Plan.Created).To(Equal(int32(15)))
 
-		// Racks are created before claims, and claims before devices.
-		creates := h.recorder.Creates()
-		Expect(creates[0]).To(HavePrefix("Rack/"))
-		Expect(creates[4]).To(HavePrefix("Device/"))
+		// Every kind is created after the kinds it references.
+		creates := h.recorder.Applies()
+		order := map[string]int{}
+		for i, kind := range fleet.WriteKinds {
+			order[kind] = i
+		}
+		for i := 1; i < len(creates); i++ {
+			Expect(order[strings.Split(creates[i-1], "/")[0]]).To(BeNumerically("<=", order[strings.Split(creates[i], "/")[0]]), creates)
+		}
 		for _, d := range h.list(fleet.KindDevice) {
 			claim, _, _ := unstructured.NestedString(d.Object, "spec", "claimRef", "name")
 			Expect(claim).NotTo(BeEmpty())
-			Expect(d.Object["spec"]).NotTo(HaveKey("provenance"))
-			Expect(d.GetLabels()).To(Equal(map[string]string{plan.LabelSource: testSystem, plan.LabelType: "dcim.devices", plan.LabelID: "1000"}))
+		}
+		for _, kind := range fleet.WriteKinds {
+			for _, obj := range h.list(kind) {
+				Expect(obj.Object["spec"]).NotTo(HaveKey("provenance"))
+				labels := obj.GetLabels()
+				Expect(labels).To(HaveLen(3))
+				Expect(labels).To(HaveKeyWithValue(plan.LabelSource, testSystem))
+				Expect(obj.GetName()).To(Equal(plan.Name(plan.SourceKey{Source: testSystem, Type: strings.ReplaceAll(labels[plan.LabelType], ".", "/"), ID: labels[plan.LabelID]}, kind)))
+			}
 		}
 
 		h.r.Now = func() time.Time { return testNow.Add(time.Hour) }
 		_, err = h.reconcile()
 		Expect(err).NotTo(HaveOccurred())
-		Expect(h.recorder.Creates()).To(HaveLen(5), "records correlated by our labels are unchanged; nothing is written")
+		Expect(h.recorder.Applies()).To(HaveLen(15), "records correlated by our labels are unchanged; nothing is written")
 		s = h.source()
-		Expect(s.Status.Plan.Unchanged).To(Equal(int32(5)))
+		Expect(s.Status.Plan.Unchanged).To(Equal(int32(15)))
 		Expect(s.Status.Plan.Create).To(BeZero())
-		Expect(condition(s, ConditionApplied).Message).To(Equal("no new records to create"))
+		Expect(condition(s, ConditionApplied).Message).To(Equal("no records to write"))
+		Expect(s.Status.Plan.Update).To(BeZero(), "a steady state makes no apply calls")
 	})
 
 	It("rejects an existing name from another writer and never overwrites it", func() {
@@ -116,8 +132,9 @@ var _ = Describe("NetBoxSource reconcile", func() {
 		Expect(recordFor(s, "dcim/racks/100", "Rack")).To(SatisfyAll(
 			HaveField("State", netboxv1alpha1.RecordStateQuarantined), HaveField("Reason", plan.ReasonNameConflict), HaveField("Message", ContainSubstring("Flux"))))
 		Expect(recordFor(s, "dcim/devices/1000", "Device").Reason).To(Equal(plan.ReasonDependencyBlocked))
-		// Only the claim that does not depend on the rack is created.
-		Expect(h.recorder.Creates()).To(HaveLen(1))
+		// Only the claim and unidentified Device that do not depend on the
+		// rack are created.
+		Expect(h.recorder.Applies()).To(HaveLen(2))
 		Expect(condition(s, ConditionReady).Reason).To(Equal(ReasonReviewRequired))
 	})
 
@@ -145,15 +162,24 @@ var _ = Describe("NetBoxSource reconcile", func() {
 		Expect(current.GetLabels()).NotTo(HaveKey(plan.LabelSource))
 	})
 
-	It("plans the claim but not the Device when no chassis serial is known", func() {
+	It("records a device without a chassis serial as unidentified, and defers a provider-hosted one", func() {
 		h := newHarness().withSourceAndToken(netboxv1alpha1.SourceModeCreate)
 		_, err := h.reconcile()
 		Expect(err).NotTo(HaveOccurred())
 		s := h.source()
-		Expect(recordFor(s, "dcim/devices/1002", "")).To(SatisfyAll(
+		Expect(recordFor(s, "dcim/devices/1002", "Device").State).To(Equal(netboxv1alpha1.RecordStateCreated))
+		device := &unstructured.Unstructured{}
+		device.SetGroupVersionKind(fleet.GVK(fleet.KindDevice))
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: h.namespace, Name: plan.Name(plan.SourceKey{Source: testSystem, Type: plan.TypeDevice, ID: "1002"}, fleet.KindDevice)}, device)).To(Succeed())
+		identity, _, _ := unstructured.NestedMap(device.Object, "spec", "identity")
+		Expect(identity).To(HaveKeyWithValue("unidentified", true))
+		Expect(identity).To(HaveKeyWithValue("unidentifiedReason", plan.UnidentifiedSerialUnreviewed))
+		Expect(identity).NotTo(HaveKey("serial"))
+
+		Expect(recordFor(s, "dcim/devices/1001", "")).To(SatisfyAll(
 			HaveField("State", netboxv1alpha1.RecordStateUnresolved), HaveField("Reason", plan.ReasonIdentityUnavailable)))
-		Expect(recordFor(s, "dcim/devices/1002", "DeviceClaim").State).To(Equal(netboxv1alpha1.RecordStateCreated))
-		Expect(h.recorder.Creates()).NotTo(ContainElement("Device/" + plan.Name(plan.SourceKey{Source: testSystem, Type: plan.TypeDevice, ID: "1002"}, fleet.KindDevice)))
+		Expect(recordFor(s, "dcim/devices/1001", "DeviceClaim").State).To(Equal(netboxv1alpha1.RecordStateCreated))
+		Expect(h.recorder.Applies()).NotTo(ContainElement("Device/" + plan.Name(plan.SourceKey{Source: testSystem, Type: plan.TypeDevice, ID: "1001"}, fleet.KindDevice)))
 	})
 
 	It("quarantines an identity collision with an existing Device", func() {
@@ -170,9 +196,10 @@ var _ = Describe("NetBoxSource reconcile", func() {
 		Expect(recordFor(s, "dcim/devices/1000", "Device")).To(SatisfyAll(
 			HaveField("State", netboxv1alpha1.RecordStateQuarantined), HaveField("Reason", plan.ReasonIdentityCollision)))
 		Expect(recordFor(s, "dcim/devices/1000", "DeviceClaim").Reason).To(Equal(plan.ReasonDependencyBlocked))
-		Expect(h.list(fleet.KindDevice)).To(HaveLen(1), "only the record not written by this controller")
-		for _, created := range h.recorder.Creates() {
-			Expect(created).NotTo(HavePrefix("Device/"))
+		Expect(h.recorder.Applies()).NotTo(ContainElement("Device/" + plan.Name(plan.SourceKey{Source: testSystem, Type: plan.TypeDevice, ID: "1000"}, fleet.KindDevice)))
+		Expect(recordFor(s, "dcim/cables/5000", "Cable").Reason).To(Equal(plan.ReasonDependencyBlocked), "a cable never references a Device that is not created")
+		for _, created := range h.recorder.Applies() {
+			Expect(created).NotTo(Equal("Cable/" + plan.Name(plan.SourceKey{Source: testSystem, Type: plan.TypeCable, ID: "5000"}, fleet.KindCable)))
 		}
 	})
 
@@ -180,13 +207,13 @@ var _ = Describe("NetBoxSource reconcile", func() {
 		h := newHarness().withSourceAndToken(netboxv1alpha1.SourceModeCreate)
 		_, err := h.reconcile()
 		Expect(err).NotTo(HaveOccurred())
-		Expect(fleetCount(h)).To(Equal(5))
+		Expect(fleetCount(h)).To(Equal(15))
 
 		h.server.Remove(netbox.CollectionDevices, 1000)
 		h.r.Now = func() time.Time { return testNow.Add(time.Hour) }
 		_, err = h.reconcile()
 		Expect(err).NotTo(HaveOccurred())
-		Expect(fleetCount(h)).To(Equal(5))
+		Expect(fleetCount(h)).To(Equal(15))
 		s := h.source()
 		Expect(s.Status.Plan.RetainedMissingSource).To(Equal(int32(2)))
 		Expect(recordFor(s, "dcim/devices/1000", "")).To(HaveField("State", netboxv1alpha1.RecordStateRetainedMissingSource))
@@ -197,7 +224,7 @@ var _ = Describe("NetBoxSource reconcile", func() {
 		h.server.Fail(netbox.CollectionDevices, http.StatusInternalServerError)
 		_, err := h.reconcile()
 		Expect(err).To(HaveOccurred())
-		Expect(h.recorder.Creates()).To(BeEmpty(), "a partial read never produces writes")
+		Expect(h.recorder.Applies()).To(BeEmpty(), "a partial read never produces writes")
 		s := h.source()
 		Expect(condition(s, ConditionSourceObserved)).To(SatisfyAll(HaveField("Status", metav1.ConditionUnknown), HaveField("Reason", ReasonReadFailed)))
 		Expect(condition(s, ConditionReady).Status).To(Equal(metav1.ConditionUnknown))
@@ -207,7 +234,7 @@ var _ = Describe("NetBoxSource reconcile", func() {
 		h.server.Fail(netbox.CollectionDevices, 0)
 		_, err = h.reconcile()
 		Expect(err).NotTo(HaveOccurred())
-		Expect(h.recorder.Creates()).To(HaveLen(5))
+		Expect(h.recorder.Applies()).To(HaveLen(15))
 		Expect(condition(h.source(), ConditionSourceObserved).Status).To(Equal(metav1.ConditionTrue))
 	})
 
@@ -218,7 +245,7 @@ var _ = Describe("NetBoxSource reconcile", func() {
 		Expect(err).NotTo(HaveOccurred(), "a rejected token is not returned to the rate limiter")
 		Expect(result.RequeueAfter).To(BeNumerically(">=", rejectedCredentialsInterval))
 		Expect(h.server.Requests()).To(Equal(1), "one rejected request per attempt")
-		Expect(h.recorder.Creates()).To(BeEmpty())
+		Expect(h.recorder.Applies()).To(BeEmpty())
 		s := h.source()
 		Expect(condition(s, ConditionConfigurationResolved)).To(SatisfyAll(HaveField("Status", metav1.ConditionFalse), HaveField("Reason", ReasonTokenRejected)))
 		Expect(condition(s, ConditionSourceObserved).Status).To(Equal(metav1.ConditionUnknown))
@@ -347,6 +374,6 @@ var _ = Describe("NetBoxSource reconcile", func() {
 		late.Name = "late"
 		Expect(k8sClient.Create(ctx, late)).To(Succeed())
 		Eventually(func() string { return condition(h.source(), ConditionApplied).Reason }, 20*time.Second).Should(Equal(ReasonObserveOnly))
-		Expect(h.recorder.Creates()).To(BeEmpty())
+		Expect(h.recorder.Applies()).To(BeEmpty())
 	})
 })

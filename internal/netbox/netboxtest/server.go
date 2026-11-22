@@ -39,7 +39,17 @@ type Server struct {
 }
 
 // Collections served, matching the reader's collections.
-var Collections = []string{"dcim/sites", "dcim/locations", "dcim/racks", "dcim/device-types", "dcim/devices"}
+var Collections = []string{
+	"dcim/sites", "dcim/locations", "dcim/racks", "dcim/device-types", "dcim/devices",
+	"dcim/interfaces", "dcim/power-ports", "dcim/power-outlets", "dcim/console-ports", "dcim/console-server-ports",
+	"dcim/front-ports", "dcim/rear-ports", "dcim/modules", "dcim/inventory-items", "dcim/device-bays",
+	"dcim/power-panels", "dcim/power-feeds", "dcim/cables", "ipam/ip-addresses",
+}
+
+// siteFiltered are the collections whose records carry a site, which the
+// fake filters by site_id. NetBox resolves the filter through the device or
+// panel for the others; the fixtures hold only in-scope records for those.
+var siteFiltered = map[string]bool{"dcim/locations": true, "dcim/racks": true, "dcim/devices": true, "dcim/power-panels": true}
 
 // FixtureDir is the directory of the synthetic fixture collections.
 func FixtureDir() string {
@@ -94,6 +104,17 @@ func (s *Server) Fail(collection string, status int) {
 	s.failWith[collection] = status
 }
 
+// Set changes one field of a record.
+func (s *Server) Set(collection string, id int, field string, value any) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, r := range s.data[collection] {
+		if int(r["id"].(float64)) == id {
+			r[field] = value
+		}
+	}
+}
+
 // Remove deletes a record from a collection.
 func (s *Server) Remove(collection string, id int) {
 	s.mu.Lock()
@@ -146,11 +167,11 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 
 func filter(records []map[string]any, collection string, query url.Values) []map[string]any {
 	key, field := "site_id", "site"
-	if collection == "dcim/sites" {
+	if collection == "dcim/sites" || collection == "ipam/ip-addresses" {
 		key, field = "id", ""
 	}
 	wanted := query[key]
-	if len(wanted) == 0 || collection == "dcim/device-types" {
+	if len(wanted) == 0 || (field != "" && !siteFiltered[collection]) {
 		return records
 	}
 	out := []map[string]any{}

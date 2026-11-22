@@ -28,20 +28,24 @@ const (
 	Version = "v1alpha1"
 )
 
-// Kinds this controller reads. It creates only Rack, DeviceClaim and Device,
-// and reads Facility to resolve mapped premises.
+// Kinds this controller reads. It creates Racks, PowerFeeds, DeviceClaims,
+// Devices and Cables, and reads Facility to resolve mapped premises.
 const (
 	KindFacility    = "Facility"
 	KindRack        = "Rack"
+	KindPowerFeed   = "PowerFeed"
 	KindDeviceClaim = "DeviceClaim"
 	KindDevice      = "Device"
+	KindCable       = "Cable"
 )
 
 // ReadKinds are listed to observe existing Fleet state, in creation order.
-var ReadKinds = []string{KindFacility, KindRack, KindDeviceClaim, KindDevice}
+var ReadKinds = []string{KindFacility, KindRack, KindPowerFeed, KindDeviceClaim, KindDevice, KindCable}
 
-// WriteKinds are the only kinds ever created, in dependency order.
-var WriteKinds = []string{KindRack, KindDeviceClaim, KindDevice}
+// WriteKinds are the only kinds ever created, in dependency order: a Cable
+// references Devices and PowerFeeds, a Device its DeviceClaim, and claims and
+// feeds their Rack.
+var WriteKinds = []string{KindRack, KindPowerFeed, KindDeviceClaim, KindDevice, KindCable}
 
 // GVK returns the GroupVersionKind for a Fleet inventory kind.
 func GVK(kind string) schema.GroupVersionKind {
@@ -80,12 +84,15 @@ type ExpectedIdentity struct {
 	Serial       string `json:"serial,omitempty"`
 }
 
-// Placement is typed installation placement. Exact rack units are never
-// written by this controller.
+// Placement is typed installation placement. Position, Height and Face are
+// set only for RackUnits placement.
 type Placement struct {
 	Scope       string          `json:"scope"`
 	FacilityRef *LocalReference `json:"facilityRef,omitempty"`
 	RackRef     *LocalReference `json:"rackRef,omitempty"`
+	Position    int32           `json:"position,omitempty"`
+	Height      int32           `json:"height,omitempty"`
+	Face        string          `json:"face,omitempty"`
 }
 
 // DeviceClaimSpec is the written subset of DeviceClaim.spec.
@@ -108,6 +115,12 @@ type DeviceIdentity struct {
 	Model        string `json:"model"`
 	Serial       string `json:"serial,omitempty"`
 	SystemUUID   string `json:"systemUUID,omitempty"`
+	// Unidentified records that the Device has no recorded hardware
+	// identity. It is only ever true, never set with a serial or system
+	// UUID, and always set with UnidentifiedReason. Such a Device can be
+	// cabled but never enrolled as capacity.
+	Unidentified       bool   `json:"unidentified,omitempty"`
+	UnidentifiedReason string `json:"unidentifiedReason,omitempty"`
 }
 
 // DeviceSpec is the written subset of Device.spec.
@@ -119,6 +132,101 @@ type DeviceSpec struct {
 	TopologyAuthority string             `json:"topologyAuthority,omitempty"`
 	ClaimRef          LocalReference     `json:"claimRef"`
 	Identity          DeviceIdentity     `json:"identity"`
+	BMC               *BMC               `json:"bmc,omitempty"`
+	Components        []Component        `json:"components,omitempty"`
+	InternalMappings  []InternalMapping  `json:"internalMappings,omitempty"`
+}
+
+// BMC is the written subset of Device.spec.bmc.
+type BMC struct {
+	Endpoint string `json:"endpoint"`
+}
+
+// Component types.
+const (
+	ComponentNetworkPort       = "NetworkPort"
+	ComponentPowerInlet        = "PowerInlet"
+	ComponentPowerOutlet       = "PowerOutlet"
+	ComponentConsolePort       = "ConsolePort"
+	ComponentConsoleServerPort = "ConsoleServerPort"
+	ComponentFrontPort         = "FrontPort"
+	ComponentRearPort          = "RearPort"
+	ComponentModule            = "Module"
+	ComponentInventoryItem     = "InventoryItem"
+	ComponentDeviceBay         = "DeviceBay"
+)
+
+// Component is a typed part of a Device, or a PowerFeed termination.
+type Component struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Type      string `json:"type"`
+	Connector string `json:"connector,omitempty"`
+	Positions int32  `json:"positions,omitempty"`
+	Serial    string `json:"serial,omitempty"`
+	AssetTag  string `json:"assetTag,omitempty"`
+}
+
+// ComponentPosition is one position of a component.
+type ComponentPosition struct {
+	ComponentID string `json:"componentID"`
+	Position    int32  `json:"position"`
+}
+
+// InternalMapping is a fixed path inside a Device: a front port position to a
+// rear port position, or a power outlet to the inlet that feeds it.
+type InternalMapping struct {
+	From ComponentPosition `json:"from"`
+	To   ComponentPosition `json:"to"`
+}
+
+// Cable media.
+const (
+	MediumCopper  = "Copper"
+	MediumFiber   = "Fiber"
+	MediumPower   = "Power"
+	MediumConsole = "Console"
+	MediumUnknown = "Unknown"
+)
+
+// CableEndpoint is one end of a cable lane: a component of a Device or a
+// PowerFeed termination.
+type CableEndpoint struct {
+	DeviceRef    *LocalReference `json:"deviceRef,omitempty"`
+	PowerFeedRef *LocalReference `json:"powerFeedRef,omitempty"`
+	ComponentID  string          `json:"componentID"`
+	Position     int32           `json:"position"`
+}
+
+// CableLane is one conductor path of a cable.
+type CableLane struct {
+	ID string        `json:"id"`
+	A  CableEndpoint `json:"a"`
+	B  CableEndpoint `json:"b"`
+}
+
+// CableSpec is the written subset of Cable.spec.
+type CableSpec struct {
+	DisplayName string      `json:"displayName"`
+	Medium      string      `json:"medium"`
+	Lanes       []CableLane `json:"lanes"`
+}
+
+// PowerSupply is the written subset of PowerFeed.spec.supply.
+type PowerSupply struct {
+	Type     string `json:"type"`
+	VoltageV int32  `json:"voltageV,omitempty"`
+	CurrentA int32  `json:"currentA,omitempty"`
+	Phase    string `json:"phase,omitempty"`
+}
+
+// PowerFeedSpec is the written subset of PowerFeed.spec.
+type PowerFeedSpec struct {
+	DisplayName  string          `json:"displayName"`
+	FacilityRef  LocalReference  `json:"facilityRef"`
+	RackRef      *LocalReference `json:"rackRef,omitempty"`
+	Supply       *PowerSupply    `json:"supply,omitempty"`
+	Terminations []Component     `json:"terminations"`
 }
 
 // NewObject returns an unstructured Fleet object with the given spec and

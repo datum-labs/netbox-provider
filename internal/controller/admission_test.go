@@ -5,8 +5,11 @@ package controller
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -25,7 +28,7 @@ import (
 
 // vendoredFleetCRDDigest is recorded in test/fleet/README.md with its source
 // commit. Re-vendoring must update both.
-const vendoredFleetCRDDigest = "21c081b63e8efb37d71d19a66616a972413b836ace24427de5d2b947f5ebbe9e"
+const vendoredFleetCRDDigest = "023ae431bfd9ff566fa511a64b7bdc247c1bd0a0d4ae912e014a07bf21848f45"
 
 var _ = Describe("Fleet admission of generated records", func() {
 	It("uses the recorded vendored Fleet CRD", func() {
@@ -41,12 +44,12 @@ var _ = Describe("Fleet admission of generated records", func() {
 	It("admits every candidate with no provenance, and rejects re-creation", func() {
 		h := newHarness()
 		p := fixturePlan(h)
-		Expect(p.Count(plan.ActionCreate)).To(Equal(5))
+		Expect(p.Count(plan.ActionCreate)).To(Equal(15))
 		kinds := map[string]bool{}
 		for _, kind := range fleet.WriteKinds {
 			for _, c := range p.Candidates {
 				if c.Kind == kind && c.Action == plan.ActionCreate {
-					Expect(k8sClient.Create(ctx, c.Object.DeepCopy())).To(Succeed(), c.Key())
+					Expect(k8sClient.Apply(ctx, client.ApplyConfigurationFromUnstructured(c.Object.DeepCopy()), client.FieldOwner(plan.FieldManager))).To(Succeed(), c.Key())
 					kinds[kind] = true
 				}
 			}
@@ -61,8 +64,19 @@ var _ = Describe("Fleet admission of generated records", func() {
 			Expect(stored.Object["spec"]).NotTo(HaveKey("provenance"), c.Key())
 			Expect(stored.Object["spec"]).NotTo(HaveKey("reportedPlacement"), c.Key())
 			Expect(stored.GetLabels()).To(HaveKeyWithValue(plan.LabelSource, testSystem))
+			Expect(ownedFields(stored, plan.FieldManager)).To(Equal(appliedFields(c.Object)), c.Key()+": netbox-provider owns exactly the applied fields")
 		}
-		Expect(kinds).To(Equal(map[string]bool{fleet.KindRack: true, fleet.KindDeviceClaim: true, fleet.KindDevice: true}))
+		Expect(kinds).To(Equal(map[string]bool{fleet.KindRack: true, fleet.KindPowerFeed: true, fleet.KindDeviceClaim: true, fleet.KindDevice: true, fleet.KindCable: true}))
+		withBMC := 0
+		for _, c := range p.Candidates {
+			if c.Kind == fleet.KindDevice {
+				if endpoint, ok, _ := unstructured.NestedString(c.Object.Object, "spec", "bmc", "endpoint"); ok {
+					Expect(endpoint).To(Equal("https://192.0.2.10:443"))
+					withBMC++
+				}
+			}
+		}
+		Expect(withBMC).To(Equal(1), "Fleet admits the BMC endpoint written from an out-of-band IP")
 		// A second create of the same name never overwrites.
 		for _, c := range p.Candidates {
 			err := k8sClient.Create(ctx, c.Object.DeepCopy())
@@ -98,21 +112,53 @@ var _ = Describe("Fleet admission of generated records", func() {
 		Fail("no rack candidate")
 	})
 
-	It("rejects a Device without serial or system UUID, which is why the plan leaves it Unresolved", func() {
+	It("admits the unidentified marker only without serial, system UUID or BMC", func() {
 		h := newHarness()
 		p := fixturePlan(h)
+		var marked, identified *unstructured.Unstructured
 		for _, c := range p.Candidates {
-			if c.Kind == fleet.KindDevice {
-				device := c.Object.DeepCopy()
-				device.SetName("netbox-identity-probe")
-				unstructured.RemoveNestedField(device.Object, "spec", "identity", "serial")
-				err := k8sClient.Create(ctx, device)
-				Expect(apierrors.IsInvalid(err)).To(BeTrue(), "%v", err)
-				Expect(err.Error()).To(ContainSubstring("a device needs a serial or system UUID"))
-				return
+			if c.Kind != fleet.KindDevice {
+				continue
+			}
+			if v, _, _ := unstructured.NestedBool(c.Object.Object, "spec", "identity", "unidentified"); v {
+				marked = c.Object
+			} else if identified == nil {
+				identified = c.Object
 			}
 		}
-		Fail("no device candidate")
+		Expect(marked).NotTo(BeNil(), "the fixture plans an unidentified Device")
+		Expect(identified).NotTo(BeNil())
+		probe := func(base *unstructured.Unstructured, name string, mutate func(*unstructured.Unstructured)) error {
+			device := base.DeepCopy()
+			device.SetName(name)
+			mutate(device)
+			return k8sClient.Create(ctx, device)
+		}
+		for name, tc := range map[string]struct {
+			base    *unstructured.Unstructured
+			mutate  func(*unstructured.Unstructured)
+			message string
+		}{
+			"neither identity nor marker": {identified, func(d *unstructured.Unstructured) {
+				unstructured.RemoveNestedField(d.Object, "spec", "identity", "serial")
+			}, "a device needs a serial or system UUID, or unidentified set to true with a reason"},
+			"marker with a serial": {marked, func(d *unstructured.Unstructured) {
+				_ = unstructured.SetNestedField(d.Object, "SYNTH-PROBE-0001", "spec", "identity", "serial")
+			}, "an unidentified device cannot carry a serial or system UUID"},
+			"marker without a reason": {marked, func(d *unstructured.Unstructured) {
+				unstructured.RemoveNestedField(d.Object, "spec", "identity", "unidentifiedReason")
+			}, "unidentified and unidentifiedReason must be set together"},
+			"marker false": {marked, func(d *unstructured.Unstructured) {
+				_ = unstructured.SetNestedField(d.Object, false, "spec", "identity", "unidentified")
+			}, "unidentified may only be true"},
+			"marker with a BMC": {marked, func(d *unstructured.Unstructured) {
+				_ = unstructured.SetNestedField(d.Object, "https://bmc.example.invalid", "spec", "bmc", "endpoint")
+			}, "a device without hardware identity cannot record a BMC endpoint"},
+		} {
+			err := probe(tc.base, "netbox-probe-"+strings.ReplaceAll(name, " ", "-"), tc.mutate)
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "%s: %v", name, err)
+			Expect(err.Error()).To(ContainSubstring(tc.message), name)
+		}
 	})
 })
 
@@ -177,15 +223,64 @@ var _ = Describe("netbox.miloapis.com admission", func() {
 		Entry("physical without serial meaning", func(m *netboxv1alpha1.NetBoxMappingSpec) {
 			m.Devices = append(m.Devices, netboxv1alpha1.DeviceMapping{ID: 77, Classification: netboxv1alpha1.DeviceClassificationPhysical, Placement: netboxv1alpha1.PlacementScopeFacility})
 		}, "physical devices need serialMeaning and placement"),
-		Entry("exact rack units", func(m *netboxv1alpha1.NetBoxMappingSpec) {
+		Entry("power as a reviewed data medium", func(m *netboxv1alpha1.NetBoxMappingSpec) {
+			m.CableMedia = append(m.CableMedia, netboxv1alpha1.CableMediumRule{CableTypes: []string{"cat6"}, Medium: "Power"})
+		}, "Unsupported value"),
+		Entry("unknown placement", func(m *netboxv1alpha1.NetBoxMappingSpec) {
 			m.Devices = append(m.Devices, netboxv1alpha1.DeviceMapping{ID: 77, Classification: netboxv1alpha1.DeviceClassificationPhysical,
-				SerialMeaning: netboxv1alpha1.SerialMeaningUnknown, Placement: "RackUnits"})
+				SerialMeaning: netboxv1alpha1.SerialMeaningUnknown, Placement: "NonRackUnitMount"})
 		}, "Unsupported value"),
 		Entry("duplicate device", func(m *netboxv1alpha1.NetBoxMappingSpec) { m.Devices = append(m.Devices, m.Devices[0]) }, "Duplicate value"),
 		Entry("duplicate premises", func(m *netboxv1alpha1.NetBoxMappingSpec) { m.Facilities = append(m.Facilities, m.Facilities[0]) }, "Duplicate value"),
 		Entry("missing revision", func(m *netboxv1alpha1.NetBoxMappingSpec) { m.Revision = "" }, "revision"),
 	)
 })
+
+// ownedFields returns the top-level spec fields, labels and annotations a
+// manager owns by server-side apply.
+func ownedFields(obj *unstructured.Unstructured, manager string) map[string][]string {
+	for _, entry := range obj.GetManagedFields() {
+		if entry.Manager != manager || entry.Operation != metav1.ManagedFieldsOperationApply || entry.FieldsV1 == nil {
+			continue
+		}
+		var fields map[string]map[string]any
+		Expect(json.Unmarshal(entry.FieldsV1.GetRawBytes(), &fields)).To(Succeed())
+		keys := func(m map[string]any) []string {
+			var out []string
+			for k := range m {
+				if k != "." {
+					out = append(out, strings.TrimPrefix(k, "f:"))
+				}
+			}
+			sort.Strings(out)
+			return out
+		}
+		meta := fields["f:metadata"]
+		labels, _ := meta["f:labels"].(map[string]any)
+		annotations, _ := meta["f:annotations"].(map[string]any)
+		return map[string][]string{"spec": keys(fields["f:spec"]), "labels": keys(labels), "annotations": keys(annotations)}
+	}
+	return nil
+}
+
+// appliedFields returns the same keys from an applied configuration.
+func appliedFields(obj *unstructured.Unstructured) map[string][]string {
+	keys := func(m map[string]string) []string {
+		var out []string
+		for k := range m {
+			out = append(out, k)
+		}
+		sort.Strings(out)
+		return out
+	}
+	spec, _ := obj.Object["spec"].(map[string]any)
+	var specKeys []string
+	for k := range spec {
+		specKeys = append(specKeys, k)
+	}
+	sort.Strings(specKeys)
+	return map[string][]string{"spec": specKeys, "labels": keys(obj.GetLabels()), "annotations": keys(obj.GetAnnotations())}
+}
 
 func clientKey(namespace, name string) client.ObjectKey {
 	return client.ObjectKey{Namespace: namespace, Name: name}

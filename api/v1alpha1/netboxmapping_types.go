@@ -62,9 +62,8 @@ const (
 	SerialMeaningUnknown SerialMeaning = "Unknown"
 )
 
-// PlacementScope is the placement precision an import may assert. Exact rack
-// units are never imported.
-// +kubebuilder:validation:Enum=Facility;RackMembership
+// PlacementScope is the placement precision an import may assert.
+// +kubebuilder:validation:Enum=Facility;RackMembership;RackUnits
 type PlacementScope string
 
 const (
@@ -72,7 +71,37 @@ const (
 	PlacementScopeFacility PlacementScope = "Facility"
 	// PlacementScopeRackMembership asserts the rack, not a position.
 	PlacementScopeRackMembership PlacementScope = "RackMembership"
+	// PlacementScopeRackUnits asserts the rack units NetBox records: the
+	// device's position and face, and its device type's height. A device
+	// without all three, or with a fractional height, stays unresolved;
+	// rack units are never inferred.
+	PlacementScopeRackUnits PlacementScope = "RackUnits"
 )
+
+// CableMedium is the reviewed medium of a data cable.
+// +kubebuilder:validation:Enum=Copper;Fiber;Unknown
+type CableMedium string
+
+const (
+	CableMediumCopper  CableMedium = "Copper"
+	CableMediumFiber   CableMedium = "Fiber"
+	CableMediumUnknown CableMedium = "Unknown"
+)
+
+// CableMediumRule gives the medium of data cables of some NetBox cable types.
+type CableMediumRule struct {
+	// CableTypes are NetBox cable type values, such as cat6 or smf.
+	//
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=64
+	// +listType=set
+	CableTypes []string `json:"cableTypes"`
+
+	// Medium is the Fleet medium of those cables.
+	Medium CableMedium `json:"medium"`
+}
 
 // DeviceMapping is the reviewed interpretation of one NetBox device.
 //
@@ -119,6 +148,30 @@ type RoleExclusion struct {
 	Reason string `json:"reason"`
 }
 
+// BMCMapping records BMC endpoints from NetBox's out-of-band IPs.
+type BMCMapping struct {
+	// RoleSlugs are the NetBox device roles whose out-of-band IP is a
+	// Redfish BMC, such as servers. Other devices' out-of-band IPs, for
+	// example a switch's management address, are never written as a BMC.
+	//
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=100
+	// +listType=set
+	RoleSlugs []string `json:"roleSlugs"`
+
+	// VRFIDs are NetBox VRFs whose out-of-band IPs may be used. An address in
+	// the global table (no VRF) is always usable; an address in any other VRF
+	// is never treated as global, and writes no BMC.
+	//
+	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:items:Minimum=1
+	// +listType=set
+	// +optional
+	VRFIDs []int64 `json:"vrfIDs,omitempty"`
+}
+
 // NetBoxMappingSpec is the reviewed interpretation of a NetBox source.
 type NetBoxMappingSpec struct {
 	// Revision identifies the reviewed mapping content. It is written to
@@ -154,6 +207,28 @@ type NetBoxMappingSpec struct {
 	// +kubebuilder:validation:MaxItems=64
 	// +optional
 	Exclusions []RoleExclusion `json:"exclusions,omitempty"`
+
+	// CableMedia gives the reviewed medium of data cables by NetBox cable
+	// type. Power and console cables take their medium from the components
+	// they connect. A data cable whose type has no rule stays unresolved.
+	//
+	// +kubebuilder:validation:MaxItems=64
+	// +optional
+	CableMedia []CableMediumRule `json:"cableMedia,omitempty"`
+
+	// UntypedCableMedium is the medium of data cables that have no NetBox
+	// cable type. When unset, they stay unresolved.
+	//
+	// +optional
+	UntypedCableMedium CableMedium `json:"untypedCableMedium,omitempty"`
+
+	// BMC writes Device.spec.bmc.endpoint as https://<IPv4>:443 from the
+	// device's NetBox out-of-band IP, for Devices with a chassis serial whose
+	// role is listed. A device without a usable IPv4 out-of-band IP gets no
+	// BMC; the Device is still created. Unset writes no BMC.
+	//
+	// +optional
+	BMC *BMCMapping `json:"bmc,omitempty"`
 }
 
 // NetBoxMapping holds reviewed import decisions for a NetBoxSource.

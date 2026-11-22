@@ -13,6 +13,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/yaml"
 
 	netboxv1alpha1 "go.miloapis.com/netbox-provider/api/v1alpha1"
@@ -47,7 +48,20 @@ func snapshot(t *testing.T) *netbox.Snapshot {
 		Racks:       load[netbox.Rack](t, netbox.CollectionRacks),
 		DeviceTypes: load[netbox.DeviceType](t, netbox.CollectionDeviceTypes),
 		Devices:     load[netbox.Device](t, netbox.CollectionDevices),
+		Components:  components(t),
+		Cables:      load[netbox.Cable](t, netbox.CollectionCables),
+		PowerPanels: load[netbox.PowerPanel](t, netbox.CollectionPowerPanels),
+		PowerFeeds:  load[netbox.PowerFeed](t, netbox.CollectionPowerFeeds),
+		IPAddresses: load[netbox.IPAddress](t, netbox.CollectionIPAddresses),
 	}
+}
+
+func components(t *testing.T) map[string][]netbox.Component {
+	out := map[string][]netbox.Component{}
+	for _, collection := range netbox.ComponentCollections {
+		out[collection] = load[netbox.Component](t, collection)
+	}
+	return out
 }
 
 func mapping(t *testing.T) netboxv1alpha1.NetBoxMappingSpec {
@@ -144,18 +158,34 @@ func equalJSON(a, b any) bool {
 func TestFixturePlan(t *testing.T) {
 	p := plan.Build(input(t))
 	want := map[string]outcome{
-		"Rack dcim/racks/100":           {plan.ActionCreate, plan.ReasonNew},
-		"DeviceClaim dcim/devices/1000": {plan.ActionCreate, plan.ReasonNew},
-		"Device dcim/devices/1000":      {plan.ActionCreate, plan.ReasonNew},
-		"DeviceClaim dcim/devices/1001": {plan.ActionCreate, plan.ReasonNew},
-		"DeviceClaim dcim/devices/1002": {plan.ActionCreate, plan.ReasonNew},
-		"record dcim/devices/1001":      {"Unresolved", plan.ReasonIdentityUnavailable},
-		"record dcim/devices/1002":      {"Unresolved", plan.ReasonIdentityUnavailable},
-		"record dcim/racks/101":         {"Unresolved", plan.ReasonPremisesUnmapped},
-		"record dcim/devices/1003":      {"Excluded", plan.ReasonExcludedByRole},
-		"record dcim/devices/1004":      {"Unresolved", plan.ReasonDeviceUnmapped},
-		"record dcim/devices/1005":      {"Unresolved", plan.ReasonModelAbsent},
-		"record dcim/devices/1006":      {"Unresolved", plan.ReasonDependencyBlocked},
+		"Rack dcim/racks/100":             {plan.ActionCreate, plan.ReasonNew},
+		"PowerFeed dcim/power-feeds/6000": {plan.ActionCreate, plan.ReasonNew},
+		"DeviceClaim dcim/devices/1000":   {plan.ActionCreate, plan.ReasonNew},
+		"Device dcim/devices/1000":        {plan.ActionCreate, plan.ReasonNew},
+		"DeviceClaim dcim/devices/1001":   {plan.ActionCreate, plan.ReasonNew},
+		"DeviceClaim dcim/devices/1002":   {plan.ActionCreate, plan.ReasonNew},
+		"Device dcim/devices/1002":        {plan.ActionCreate, plan.ReasonNew},
+		"DeviceClaim dcim/devices/1007":   {plan.ActionCreate, plan.ReasonNew},
+		"Device dcim/devices/1007":        {plan.ActionCreate, plan.ReasonNew},
+		"DeviceClaim dcim/devices/1008":   {plan.ActionCreate, plan.ReasonNew},
+		"Device dcim/devices/1008":        {plan.ActionCreate, plan.ReasonNew},
+		"Cable dcim/cables/5000":          {plan.ActionCreate, plan.ReasonNew},
+		"Cable dcim/cables/5001":          {plan.ActionCreate, plan.ReasonNew},
+		"Cable dcim/cables/5002":          {plan.ActionCreate, plan.ReasonNew},
+		"Cable dcim/cables/5008":          {plan.ActionCreate, plan.ReasonNew},
+		"record dcim/devices/1001":        {"Unresolved", plan.ReasonIdentityUnavailable},
+		"record dcim/racks/101":           {"Unresolved", plan.ReasonPremisesUnmapped},
+		"record dcim/devices/1003":        {"Excluded", plan.ReasonExcludedByRole},
+		"record dcim/devices/1004":        {"Unresolved", plan.ReasonDeviceUnmapped},
+		"record dcim/devices/1005":        {"Unresolved", plan.ReasonModelAbsent},
+		"record dcim/devices/1006":        {"Unresolved", plan.ReasonDependencyBlocked},
+		"record dcim/power-feeds/6001":    {"Excluded", plan.ReasonNotInstalled},
+		"record dcim/power-feeds/6002":    {"Unresolved", plan.ReasonPowerPanelAbsent},
+		"record dcim/cables/5003":         {"Unresolved", plan.ReasonEndpointUnavailable},
+		"record dcim/cables/5004":         {"Unresolved", plan.ReasonEndpointUnavailable},
+		"record dcim/cables/5005":         {"Excluded", plan.ReasonNotInstalled},
+		"record dcim/cables/5006":         {"Unresolved", plan.ReasonCableMediumUnreviewed},
+		"record dcim/cables/5007":         {"Unresolved", plan.ReasonEndpointUnsupported},
 	}
 	got := outcomes(p)
 	for k, w := range want {
@@ -206,9 +236,16 @@ func TestFixturePlan(t *testing.T) {
 
 	for _, c := range p.Candidates {
 		encoded, _ := json.Marshal(c.Object.Object)
-		for _, forbidden := range []string{`"provenance"`, "recordedBy", "recordedAt", `"source"`, "sourceIdentity", "Import", `"position"`, `"height"`, `"face"`, `"status"`, `"bmc"`, "must-not-be-retained", "deviceRef", "https://"} {
+		for _, forbidden := range []string{`"provenance"`, "recordedBy", "recordedAt", `"source"`, "sourceIdentity", "sourceRef", "upstreamSources", "Import", `"status"`, "must-not-be-retained"} {
 			if strings.Contains(string(encoded), forbidden) {
 				t.Errorf("%s contains %s", c.Key(), forbidden)
+			}
+		}
+		if c.Kind != fleet.KindDevice || c.Source != "dcim/devices/1000" {
+			for _, forbidden := range []string{`"bmc"`, "https://"} {
+				if strings.Contains(string(encoded), forbidden) {
+					t.Errorf("%s contains %s; only the listed server role gets a BMC", c.Key(), forbidden)
+				}
 			}
 		}
 		if c.Object.GetNamespace() != "inventory" || c.Object.GetAPIVersion() != "fleet.datumapis.com/v1alpha1" {
@@ -260,7 +297,7 @@ func TestNamesAndLabelsAreStable(t *testing.T) {
 	}
 }
 
-func TestDeviceWithoutSerialIsUnresolved(t *testing.T) {
+func TestDeviceWithoutSerialIsRecordedAsUnidentified(t *testing.T) {
 	in := input(t)
 	for i := range in.Snapshot.Devices {
 		if in.Snapshot.Devices[i].ID == 1000 {
@@ -268,14 +305,25 @@ func TestDeviceWithoutSerialIsUnresolved(t *testing.T) {
 		}
 	}
 	p := plan.Build(in)
-	if hasCandidate(p, fleet.KindDevice, "dcim/devices/1000") {
-		t.Fatal("planned a Device with no serial or system UUID")
+	device := candidate(t, p, fleet.KindDevice, "dcim/devices/1000")
+	claim := candidate(t, p, fleet.KindDeviceClaim, "dcim/devices/1000")
+	want := map[string]any{"manufacturer": "Example Vendor", "model": "Example 1U Server", "unidentified": true, "unidentifiedReason": plan.UnidentifiedNoSerial}
+	if device.Action != plan.ActionCreate || !equalJSON(field(t, device, "identity"), want) {
+		t.Fatalf("%s %v", device.Action, field(t, device, "identity"))
 	}
-	if got := outcomes(p)["record dcim/devices/1000"]; got.reason != plan.ReasonIdentityUnavailable || got.action != "Unresolved" {
-		t.Fatalf("outcome %+v", got)
+	if field(t, claim, "expectedIdentity", "serial") != nil || field(t, device, "claimRef", "name") != claim.Name {
+		t.Fatal("an unidentified Device binds only to a claim that expects no serial")
 	}
-	if candidate(t, p, fleet.KindDeviceClaim, "dcim/devices/1000").Action != plan.ActionCreate {
-		t.Fatal("the installation plan should still be recorded")
+
+	// An unreviewed serial is dropped, never written beside the marker.
+	unknown := candidate(t, p, fleet.KindDevice, "dcim/devices/1002")
+	if field(t, unknown, "identity", "serial") != nil || field(t, unknown, "identity", "unidentifiedReason") != plan.UnidentifiedSerialUnreviewed {
+		t.Fatalf("unknown-serial identity %v", field(t, unknown, "identity"))
+	}
+
+	// A provider host ID is a provider's record, not missing identity.
+	if hasCandidate(p, fleet.KindDevice, "dcim/devices/1001") || outcomes(p)["record dcim/devices/1001"].reason != plan.ReasonIdentityUnavailable {
+		t.Fatal("a provider-hosted server was recorded as unidentified hardware")
 	}
 }
 
@@ -349,9 +397,19 @@ func previous(t *testing.T) []unstructured.Unstructured {
 	in.Mapping.Revision = "example-reviewed-0"
 	var out []unstructured.Unstructured
 	for _, c := range plan.Build(in).Candidates {
-		out = append(out, *c.Object.DeepCopy())
+		out = append(out, *applied(c.Object.DeepCopy()))
 	}
 	return out
+}
+
+// applied records a server-side apply by this controller, as the API server
+// would after a write.
+func applied(obj *unstructured.Unstructured) *unstructured.Unstructured {
+	obj.SetUID(types.UID("uid-" + obj.GetName()))
+	obj.SetManagedFields(append(obj.GetManagedFields(), metav1.ManagedFieldsEntry{
+		Manager: plan.FieldManager, Operation: metav1.ManagedFieldsOperationApply, APIVersion: "fleet.datumapis.com/v1alpha1",
+	}))
+	return obj
 }
 
 func withExisting(in plan.Input, objs ...unstructured.Unstructured) plan.Input {
@@ -366,11 +424,11 @@ func TestRecordsCorrelatedByLabelsAreUnchanged(t *testing.T) {
 	for i := range objs {
 		if objs[i].GetKind() == fleet.KindDevice {
 			// Fields another writer added are tolerated and never touched.
-			_ = unstructured.SetNestedField(objs[i].Object, "https://bmc.example.invalid", "spec", "bmc", "endpoint")
+			_ = unstructured.SetNestedStringSlice(objs[i].Object, []string{"02:00:00:00:00:01"}, "spec", "unmappedMACAddresses")
 		}
 	}
 	p := plan.Build(withExisting(input(t), objs...))
-	if p.Count(plan.ActionUnchanged) != 5 || p.Count(plan.ActionCreate) != 0 {
+	if p.Count(plan.ActionUnchanged) != len(objs) || p.Count(plan.ActionCreate) != 0 {
 		t.Fatalf("outcomes %v", outcomes(p))
 	}
 }
@@ -390,19 +448,89 @@ func TestSameNameWithoutOurLabelsIsNeverAdopted(t *testing.T) {
 	}
 }
 
-func TestDifferingRecordFromSameSourceIsQuarantined(t *testing.T) {
+func TestOwnedFieldChangeIsUpdated(t *testing.T) {
 	objs := previous(t)
 	for i := range objs {
 		if objs[i].GetKind() == fleet.KindRack {
+			// Applied before NetBox changed the rack's height.
 			_ = unstructured.SetNestedField(objs[i].Object, int64(48), "spec", "heightUnits")
+			annotations := objs[i].GetAnnotations()
+			annotations[plan.AnnotationAppliedDigest] = "sha256:previous"
+			objs[i].SetAnnotations(annotations)
 		}
 	}
-	got := outcomes(plan.Build(withExisting(input(t), objs...)))
-	if got["Rack dcim/racks/100"].reason != plan.ReasonExistingDiffers {
-		t.Fatalf("rack %+v", got["Rack dcim/racks/100"])
+	p := plan.Build(withExisting(input(t), objs...))
+	rack := candidate(t, p, fleet.KindRack, "dcim/racks/100")
+	if rack.Action != plan.ActionUpdate || rack.Reason != plan.ReasonOwnedFieldsChanged || rack.ExistingUID != types.UID("uid-"+rack.Name) {
+		t.Fatalf("rack %+v", rack)
 	}
-	if got["Device dcim/devices/1000"].action != plan.ActionUnchanged {
-		t.Fatalf("device %+v", got["Device dcim/devices/1000"])
+	if field(t, rack, "heightUnits") != float64(42) {
+		t.Fatalf("the update applies NetBox's value: %v", field(t, rack, "heightUnits"))
+	}
+	got := outcomes(p)
+	if got["Device dcim/devices/1000"].action != plan.ActionUnchanged || got["DeviceClaim dcim/devices/1000"].action != plan.ActionUnchanged {
+		t.Fatalf("an update of the rack changes nothing else: %v", got)
+	}
+
+	// A field this controller applied before but no longer maps is removed by
+	// the next apply, so a stale digest alone means an update.
+	objs = previous(t)
+	for i := range objs {
+		if objs[i].GetKind() == fleet.KindDevice {
+			annotations := objs[i].GetAnnotations()
+			annotations[plan.AnnotationAppliedDigest] = "sha256:previous"
+			objs[i].SetAnnotations(annotations)
+		}
+	}
+	if got := outcomes(plan.Build(withExisting(input(t), objs...)))["Device dcim/devices/1000"]; got.action != plan.ActionUpdate {
+		t.Fatalf("stale digest: %+v", got)
+	}
+}
+
+func TestRecordNotAppliedByThisControllerIsNeverAdopted(t *testing.T) {
+	objs := previous(t)
+	for i := range objs {
+		objs[i].SetManagedFields([]metav1.ManagedFieldsEntry{{Manager: "kubectl", Operation: metav1.ManagedFieldsOperationUpdate}})
+	}
+	p := plan.Build(withExisting(input(t), objs...))
+	if n := p.Count(plan.ActionUnchanged) + p.Count(plan.ActionUpdate); n != 0 {
+		t.Fatalf("%d records with our labels but another manager were adopted", n)
+	}
+	if rack := candidate(t, p, fleet.KindRack, "dcim/racks/100"); rack.Reason != plan.ReasonNotApplyOwned {
+		t.Fatalf("rack %+v", rack)
+	}
+}
+
+func TestImmutableChangesAreQuarantined(t *testing.T) {
+	for name, tc := range map[string]struct {
+		kind, source string
+		mutate       func(*unstructured.Unstructured)
+		message      string
+	}{
+		"hardware identity": {fleet.KindDevice, "dcim/devices/1000", func(o *unstructured.Unstructured) {
+			_ = unstructured.SetNestedField(o.Object, "SYNTH-CHASSIS-OLD", "spec", "identity", "serial")
+		}, "a hardware swap is a new Device"},
+		"claim": {fleet.KindDevice, "dcim/devices/1000", func(o *unstructured.Unstructured) {
+			_ = unstructured.SetNestedField(o.Object, "another-claim", "spec", "claimRef", "name")
+		}, "claimRef immutable"},
+		"placement": {fleet.KindDeviceClaim, "dcim/devices/1007", func(o *unstructured.Unstructured) {
+			_ = unstructured.SetNestedField(o.Object, int64(39), "spec", "placement", "position")
+		}, "explicit handover"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			objs := previous(t)
+			for i := range objs {
+				if objs[i].GetKind() == tc.kind {
+					if ref, _ := plan.KeyOf(&objs[i]); ref.String() == tc.source {
+						tc.mutate(&objs[i])
+					}
+				}
+			}
+			c := candidate(t, plan.Build(withExisting(input(t), objs...)), tc.kind, tc.source)
+			if c.Action != plan.ActionQuarantined || c.Reason != plan.ReasonImmutableChanged || !strings.Contains(c.Message, tc.message) {
+				t.Fatalf("%+v", c)
+			}
+		})
 	}
 }
 
