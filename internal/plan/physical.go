@@ -4,6 +4,8 @@ package plan
 
 import (
 	"fmt"
+	"net"
+	"net/netip"
 	"strconv"
 	"strings"
 
@@ -227,6 +229,37 @@ func (b *builder) frontPortMappings(device int64, p *deviceParts, record netbox.
 		usedRear[to] = true
 		p.mappings = append(p.mappings, fleet.InternalMapping{From: fleet.ComponentPosition{ComponentID: id, Position: int32(*m.from)}, To: to})
 	}
+}
+
+// bmcPort is the port of every BMC endpoint written from NetBox. NetBox
+// records an out-of-band address but no port; Redfish is served over HTTPS
+// on 443, and Fleet's Redfish executor requires the port to be explicit.
+const bmcPort = "443"
+
+// bmcEndpoint returns https://<IPv4>:443 from a device's NetBox out-of-band
+// IP, or why there is none. Fleet's Redfish executor accepts only a literal
+// IPv4 endpoint, so an IPv6 address is not written.
+func bmcEndpoint(device netbox.Device) (string, string) {
+	if device.OOBIP == nil || device.OOBIP.Address == "" {
+		return "", "NetBox records no out-of-band IP"
+	}
+	address := device.OOBIP.Address
+	var addr netip.Addr
+	if prefix, err := netip.ParsePrefix(address); err == nil {
+		addr = prefix.Addr()
+	} else if a, err := netip.ParseAddr(address); err == nil {
+		addr = a
+	} else {
+		return "", "the out-of-band IP is not an IP address"
+	}
+	addr = addr.Unmap()
+	switch {
+	case !addr.Is4():
+		return "", "the out-of-band IP is IPv6; Fleet's Redfish executor accepts only IPv4"
+	case addr.IsUnspecified() || addr.IsLoopback() || addr.IsMulticast() || addr.IsLinkLocalUnicast():
+		return "", "the out-of-band IP is not a usable unicast address"
+	}
+	return "https://" + net.JoinHostPort(addr.String(), bmcPort), ""
 }
 
 // rackUnits returns RackUnits placement for a device, or a reason it cannot

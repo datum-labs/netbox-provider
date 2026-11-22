@@ -28,7 +28,9 @@ written.
 
 Racks, PowerFeeds, DeviceClaims, Devices with their components and internal
 mappings, and Cables, with only the physical facts in the
-[design](design.md#mapping-netbox-to-fleet). It never writes Facilities,
+[design](design.md#mapping-netbox-to-fleet). A Device in a role the mapping
+lists also gets `spec.bmc.endpoint` from NetBox's out-of-band IP. It never
+writes Facilities,
 `reportedPlacement`, `MachineCapacity` or `deviceRef`, and never updates,
 patches or deletes a record.
 

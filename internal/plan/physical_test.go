@@ -3,6 +3,7 @@
 package plan_test
 
 import (
+	"strings"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -314,5 +315,54 @@ func TestFrontPortPositionMappings(t *testing.T) {
 				t.Fatalf("%+v", got["record dcim/devices/1007"])
 			}
 		})
+	}
+}
+
+func TestBMCEndpoint(t *testing.T) {
+	for address, want := range map[string]string{
+		"192.0.2.10/24":         "https://192.0.2.10:443",
+		"192.0.2.10":            "https://192.0.2.10:443",
+		"::ffff:192.0.2.10/120": "https://192.0.2.10:443",
+		"2001:db8::7/64":        "",
+		"0.0.0.0/0":             "",
+		"127.0.0.1/8":           "",
+		"169.254.0.5/16":        "",
+		"not-an-address":        "",
+		"":                      "",
+	} {
+		got, problem := plan.BMCEndpoint(netbox.Device{OOBIP: &netbox.IPAddressRef{Address: address}})
+		if got != want || (want == "") == (problem == "") {
+			t.Errorf("%q: endpoint %q problem %q, want %q", address, got, problem, want)
+		}
+	}
+	if got, problem := plan.BMCEndpoint(netbox.Device{}); got != "" || problem == "" {
+		t.Errorf("no out-of-band IP: %q %q", got, problem)
+	}
+}
+
+func TestBMCIsWrittenOnlyForListedRolesWithHardwareIdentity(t *testing.T) {
+	p := plan.Build(input(t))
+	server := candidate(t, p, fleet.KindDevice, "dcim/devices/1000")
+	if field(t, server, "bmc", "endpoint") != "https://192.0.2.10:443" || server.Message != "" {
+		t.Fatalf("server bmc %v message %q", field(t, server, "bmc"), server.Message)
+	}
+	unidentified := candidate(t, p, fleet.KindDevice, "dcim/devices/1002")
+	if field(t, unidentified, "bmc") != nil || !strings.Contains(unidentified.Message, "without hardware identity") || unidentified.Action != plan.ActionCreate {
+		t.Fatalf("unidentified bmc %v message %q", field(t, unidentified, "bmc"), unidentified.Message)
+	}
+	// A switch's out-of-band IP is a management address, not a BMC.
+	if field(t, candidate(t, p, fleet.KindDevice, "dcim/devices/1007"), "bmc") != nil {
+		t.Fatal("a BMC was written for a role the mapping does not list")
+	}
+	in := input(t)
+	in.Mapping.BMC = nil
+	if field(t, candidate(t, plan.Build(in), fleet.KindDevice, "dcim/devices/1000"), "bmc") != nil {
+		t.Fatal("a BMC was written without the mapping's opt-in")
+	}
+	in = input(t)
+	in.Mapping.BMC.RoleSlugs = []string{"server", "switch"}
+	sw := candidate(t, plan.Build(in), fleet.KindDevice, "dcim/devices/1007")
+	if field(t, sw, "bmc") != nil || !strings.Contains(sw.Message, "IPv6") || sw.Action != plan.ActionCreate {
+		t.Fatalf("IPv6 bmc %v message %q", field(t, sw, "bmc"), sw.Message)
 	}
 }

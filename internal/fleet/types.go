@@ -132,8 +132,14 @@ type DeviceSpec struct {
 	TopologyAuthority string             `json:"topologyAuthority,omitempty"`
 	ClaimRef          LocalReference     `json:"claimRef"`
 	Identity          DeviceIdentity     `json:"identity"`
+	BMC               *BMC               `json:"bmc,omitempty"`
 	Components        []Component        `json:"components,omitempty"`
 	InternalMappings  []InternalMapping  `json:"internalMappings,omitempty"`
+}
+
+// BMC is the written subset of Device.spec.bmc.
+type BMC struct {
+	Endpoint string `json:"endpoint"`
 }
 
 // Component types.

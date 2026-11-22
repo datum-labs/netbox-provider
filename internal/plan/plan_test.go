@@ -234,9 +234,16 @@ func TestFixturePlan(t *testing.T) {
 
 	for _, c := range p.Candidates {
 		encoded, _ := json.Marshal(c.Object.Object)
-		for _, forbidden := range []string{`"provenance"`, "recordedBy", "recordedAt", `"source"`, "sourceIdentity", "sourceRef", "upstreamSources", "Import", `"status"`, `"bmc"`, "must-not-be-retained", "https://"} {
+		for _, forbidden := range []string{`"provenance"`, "recordedBy", "recordedAt", `"source"`, "sourceIdentity", "sourceRef", "upstreamSources", "Import", `"status"`, "must-not-be-retained"} {
 			if strings.Contains(string(encoded), forbidden) {
 				t.Errorf("%s contains %s", c.Key(), forbidden)
+			}
+		}
+		if c.Kind != fleet.KindDevice || c.Source != "dcim/devices/1000" {
+			for _, forbidden := range []string{`"bmc"`, "https://"} {
+				if strings.Contains(string(encoded), forbidden) {
+					t.Errorf("%s contains %s; only the listed server role gets a BMC", c.Key(), forbidden)
+				}
 			}
 		}
 		if c.Object.GetNamespace() != "inventory" || c.Object.GetAPIVersion() != "fleet.datumapis.com/v1alpha1" {
@@ -405,7 +412,7 @@ func TestRecordsCorrelatedByLabelsAreUnchanged(t *testing.T) {
 	for i := range objs {
 		if objs[i].GetKind() == fleet.KindDevice {
 			// Fields another writer added are tolerated and never touched.
-			_ = unstructured.SetNestedField(objs[i].Object, "https://bmc.example.invalid", "spec", "bmc", "endpoint")
+			_ = unstructured.SetNestedStringSlice(objs[i].Object, []string{"02:00:00:00:00:01"}, "spec", "unmappedMACAddresses")
 		}
 	}
 	p := plan.Build(withExisting(input(t), objs...))

@@ -39,6 +39,8 @@ spec:
       classification: Physical
       serialMeaning: Chassis
       placement: RackMembership
+  bmc:
+    roleSlugs: [server]
   cableMedia:
     - cableTypes: [dac-passive, cat6]
       medium: Copper
