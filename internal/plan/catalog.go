@@ -267,29 +267,50 @@ func (b *builder) componentTemplates(deviceType int64) ([]fleet.ComponentTemplat
 
 // catalogDuplicates quarantines a planned Manufacturer or DeviceType that a
 // record from another writer already describes. Fleet cannot enforce that
-// uniqueness across objects, so a human decides which record to keep.
+// uniqueness across objects, so a human decides which record to keep. It runs
+// on every reconcile, before records are compared with what exists, so a
+// duplicate that appears after this controller's record was written also
+// quarantines it, and nothing more is applied to it. Neither record is changed
+// or deleted.
+//
+// A Manufacturer matches when its canonical name equals another writer's
+// canonical name or one of its aliases, ignoring case. A DeviceType matches
+// when its manufacturer matches the other type's manufacturer that way and the
+// model keys are equal after the same normalization.
 func (b *builder) catalogDuplicates() {
 	ours := func(obj *unstructured.Unstructured) bool {
 		ref, ok := KeyOf(obj)
 		return ok && ref.Source == b.in.System
 	}
-	otherCanonical := map[string]string{}
-	allCanonical := map[string]string{}
+	// otherNames maps a lowercased canonical name or alias to the other
+	// writer's Manufacturer; namesOf lists every existing Manufacturer's
+	// lowercased canonical name and aliases.
+	otherNames := map[string]string{}
+	namesOf := map[string][]string{}
 	for i := range b.in.Existing[fleet.KindManufacturer] {
 		obj := &b.in.Existing[fleet.KindManufacturer][i]
-		name, _, _ := unstructured.NestedString(obj.Object, "spec", "canonicalName")
-		allCanonical[obj.GetName()] = name
+		canonical, _, _ := unstructured.NestedString(obj.Object, "spec", "canonicalName")
+		aliases, _, _ := unstructured.NestedStringSlice(obj.Object, "spec", "aliases")
+		names := []string{strings.ToLower(canonical)}
+		for _, alias := range aliases {
+			names = append(names, strings.ToLower(alias))
+		}
+		namesOf[obj.GetName()] = names
 		if !ours(obj) {
-			otherCanonical[strings.ToLower(name)] = obj.GetName()
+			for _, name := range names {
+				otherNames[name] = obj.GetName()
+			}
 		}
 	}
 	for _, c := range b.plan.Candidates {
+		// Before reconcile, every planned record is ActionCreate, whether or
+		// not it already exists; anything else was quarantined earlier.
 		if c.Kind != fleet.KindManufacturer || c.Action != ActionCreate {
 			continue
 		}
-		if other, ok := otherCanonical[strings.ToLower(b.canonical[c.Name])]; ok {
+		if other, ok := otherNames[strings.ToLower(b.canonical[c.Name])]; ok {
 			c.Action, c.Reason = ActionQuarantined, ReasonCatalogDuplicate
-			c.Message = fmt.Sprintf("Manufacturer %q from another writer already has the canonical name %q; this one is not written until someone decides which to keep", other, b.canonical[c.Name])
+			c.Message = fmt.Sprintf("Manufacturer %q from another writer already names %q, as this controller's Manufacturer %q does; neither is changed, and this one is not written until someone decides which to keep", other, b.canonical[c.Name], c.Name)
 		}
 	}
 	otherTypes := map[string]string{}
@@ -300,8 +321,8 @@ func (b *builder) catalogDuplicates() {
 		}
 		manufacturer, _, _ := unstructured.NestedString(obj.Object, "spec", "manufacturerRef", "name")
 		model, _, _ := unstructured.NestedString(obj.Object, "spec", "model")
-		if canonical, ok := allCanonical[manufacturer]; ok {
-			otherTypes[strings.ToLower(canonical)+"/"+model] = obj.GetName()
+		for _, name := range namesOf[manufacturer] {
+			otherTypes[name+"/"+ModelKey("", model)] = obj.GetName()
 		}
 	}
 	for _, c := range b.plan.Candidates {
@@ -310,9 +331,9 @@ func (b *builder) catalogDuplicates() {
 		}
 		manufacturer, _, _ := unstructured.NestedString(c.Object.Object, "spec", "manufacturerRef", "name")
 		model, _, _ := unstructured.NestedString(c.Object.Object, "spec", "model")
-		if other, ok := otherTypes[strings.ToLower(b.canonical[manufacturer])+"/"+model]; ok {
+		if other, ok := otherTypes[strings.ToLower(b.canonical[manufacturer])+"/"+ModelKey("", model)]; ok {
 			c.Action, c.Reason = ActionQuarantined, ReasonCatalogDuplicate
-			c.Message = fmt.Sprintf("DeviceType %q from another writer already describes %s %s; this one is not written until someone decides which to keep", other, b.canonical[manufacturer], model)
+			c.Message = fmt.Sprintf("DeviceType %q from another writer already describes %s %s, as this controller's DeviceType %q does; neither is changed, and this one is not written until someone decides which to keep", other, b.canonical[manufacturer], model, c.Name)
 		}
 	}
 }

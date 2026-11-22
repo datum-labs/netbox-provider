@@ -175,6 +175,88 @@ func TestOperatorWrittenCatalogRecordsAreNeverAdopted(t *testing.T) {
 	if c.Action != plan.ActionQuarantined || c.Reason != plan.ReasonCatalogDuplicate || !strings.Contains(c.Message, "operator-1u") {
 		t.Fatalf("device type %+v", c)
 	}
+
+	// The operator's model is normalized with the same rule as ours.
+	unnormalized := operatorType.DeepCopy()
+	_ = unstructured.SetNestedField(unnormalized.Object, "Example_1U", "spec", "model")
+	c = candidate(t, plan.Build(withExisting(input(t), append(kept, *unnormalized)...)), fleet.KindDeviceType, "dcim/device-types/500")
+	if c.Action != plan.ActionQuarantined || c.Reason != plan.ReasonCatalogDuplicate {
+		t.Fatalf("unnormalized operator model %+v", c)
+	}
+
+	// An operator's Manufacturer that lists our canonical name as an alias.
+	aliased := object(fleet.KindManufacturer, "operator-aliased", map[string]any{
+		"displayName": "Vendor Holdings", "canonicalName": "Vendor Holdings", "aliases": []any{"Holdings", "example VENDOR"},
+	}, nil)
+	m = candidate(t, plan.Build(withExisting(input(t), aliased)), fleet.KindManufacturer, "dcim/manufacturers/50")
+	if m.Action != plan.ActionQuarantined || m.Reason != plan.ReasonCatalogDuplicate || !strings.Contains(m.Message, "operator-aliased") {
+		t.Fatalf("aliased manufacturer %+v", m)
+	}
+}
+
+func TestManufacturersDifferingOnlyInCaseAreQuarantined(t *testing.T) {
+	in := input(t)
+	in.Snapshot.Manufacturers = append(in.Snapshot.Manufacturers, netbox.Manufacturer{ID: 52, Name: "EXAMPLE VENDOR"})
+	for i := range in.Snapshot.DeviceTypes {
+		if in.Snapshot.DeviceTypes[i].ID == 504 {
+			in.Snapshot.DeviceTypes[i].Manufacturer = &netbox.NamedRef{ID: 52, Name: "EXAMPLE VENDOR"}
+		}
+	}
+	p := plan.Build(in)
+	for _, source := range []string{"dcim/manufacturers/50", "dcim/manufacturers/52"} {
+		c := candidate(t, p, fleet.KindManufacturer, source)
+		if c.Action != plan.ActionQuarantined || c.Reason != plan.ReasonCanonicalNameCollision ||
+			!strings.Contains(c.Message, "dcim/manufacturers/50") || !strings.Contains(c.Message, "dcim/manufacturers/52") {
+			t.Fatalf("%s %+v", source, c)
+		}
+	}
+	for _, source := range []string{"dcim/device-types/500", "dcim/device-types/504"} {
+		if got := outcomes(p)["DeviceType "+source]; got.reason != plan.ReasonDependencyBlocked {
+			t.Errorf("%s %+v", source, got)
+		}
+	}
+}
+
+func TestDuplicatesAppearingAfterOursQuarantineOurs(t *testing.T) {
+	ours := plan.Build(input(t))
+	manufacturer := candidate(t, ours, fleet.KindManufacturer, "dcim/manufacturers/50").Name
+	server := candidate(t, ours, fleet.KindDeviceType, "dcim/device-types/500").Name
+
+	// An operator adds a Manufacturer after ours was written.
+	operator := object(fleet.KindManufacturer, "operator-vendor", map[string]any{"displayName": "Example Vendor", "canonicalName": "example vendor"}, nil)
+	p := plan.Build(withExisting(input(t), append(previous(t), operator)...))
+	m := candidate(t, p, fleet.KindManufacturer, "dcim/manufacturers/50")
+	if m.Action != plan.ActionQuarantined || m.Reason != plan.ReasonCatalogDuplicate ||
+		!strings.Contains(m.Message, "operator-vendor") || !strings.Contains(m.Message, manufacturer) {
+		t.Fatalf("manufacturer %+v", m)
+	}
+	// Our DeviceType needs no write, so nothing is applied to it either.
+	if got := candidate(t, p, fleet.KindDeviceType, "dcim/device-types/500"); got.Action != plan.ActionUnchanged {
+		t.Fatalf("device type %+v", got)
+	}
+	// Devices keep the reference they already have and are not rewritten.
+	d := candidate(t, p, fleet.KindDevice, "dcim/devices/1000")
+	if d.Action != plan.ActionUnchanged || field(t, d, "deviceTypeRef", "name") != server {
+		t.Fatalf("device %+v ref %v", d, field(t, d, "deviceTypeRef"))
+	}
+
+	// An operator adds a DeviceType for the same model after ours was written.
+	operatorType := object(fleet.KindDeviceType, "operator-1u", map[string]any{
+		"displayName": "Example 1U", "manufacturerRef": map[string]any{"name": manufacturer}, "model": "example-1u",
+	}, nil)
+	p = plan.Build(withExisting(input(t), append(previous(t), operatorType)...))
+	c := candidate(t, p, fleet.KindDeviceType, "dcim/device-types/500")
+	if c.Action != plan.ActionQuarantined || c.Reason != plan.ReasonCatalogDuplicate ||
+		!strings.Contains(c.Message, "operator-1u") || !strings.Contains(c.Message, server) {
+		t.Fatalf("device type %+v", c)
+	}
+	if got := candidate(t, p, fleet.KindManufacturer, "dcim/manufacturers/50"); got.Action != plan.ActionUnchanged {
+		t.Fatalf("manufacturer %+v", got)
+	}
+	d = candidate(t, p, fleet.KindDevice, "dcim/devices/1000")
+	if d.Action != plan.ActionUnchanged || field(t, d, "deviceTypeRef", "name") != server {
+		t.Fatalf("device %+v ref %v", d, field(t, d, "deviceTypeRef"))
+	}
 }
 
 func TestDeviceTypeRefsAreAddedLaterAndNeverRemoved(t *testing.T) {
