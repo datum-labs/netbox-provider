@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
@@ -234,6 +235,7 @@ func (r *NetBoxSourceReconciler) Reconcile(ctx context.Context, req reconcile.Re
 	}
 
 	r.summarize(&source, p)
+	logPlan(logger, p)
 	blocked := status.Plan.Quarantined + status.Plan.Unresolved
 	switch {
 	case uncertain > 0:
@@ -406,6 +408,18 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n]
+}
+
+// logPlan logs every planned target and source record. Status holds at most
+// maxStatusRecords rows; the log is where a whole plan can be reviewed. It
+// carries the same fields as status, never serials or tokens.
+func logPlan(logger logr.Logger, p *plan.Plan) {
+	for _, c := range p.Candidates {
+		logger.Info("planned record", "source", c.Source, "target", c.Key(), "action", c.Action, "reason", c.Reason, "message", c.Message)
+	}
+	for _, rec := range append(append([]plan.Record{}, p.Records...), p.Retained...) {
+		logger.Info("planned record", "source", rec.Source, "action", rec.State, "reason", rec.Reason, "message", truncate(rec.Message, 256))
+	}
 }
 
 // summarize writes plan counts and the bounded record list to status.

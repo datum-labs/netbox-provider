@@ -130,6 +130,11 @@ type builder struct {
 	facilities map[string]*unstructured.Unstructured
 	byKey      map[string]*Candidate
 	rackByID   map[int64]*Candidate
+	feedByID   map[int64]*Candidate
+	deviceByID map[int64]*Candidate
+	parts      map[int64]*deviceParts
+	components map[string]owned
+	logical    map[string]bool
 	premises   map[netboxv1alpha1.PremisesSourceType]map[int64]string
 	sourceAt   string
 }
@@ -142,6 +147,8 @@ func Build(in Input) *Plan {
 		facilities: map[string]*unstructured.Unstructured{},
 		byKey:      map[string]*Candidate{},
 		rackByID:   map[int64]*Candidate{},
+		feedByID:   map[int64]*Candidate{},
+		deviceByID: map[int64]*Candidate{},
 		premises:   map[netboxv1alpha1.PremisesSourceType]map[int64]string{},
 		sourceAt:   in.Snapshot.ObservedAt.UTC().Format(time.RFC3339),
 	}
@@ -151,7 +158,10 @@ func Build(in Input) *Plan {
 	}
 	b.mapPremises()
 	b.racks()
+	b.powerFeeds()
+	b.collectComponents()
 	b.devices()
+	b.cables()
 	b.reconcile()
 	b.collisions()
 	b.propagate()
@@ -344,6 +354,22 @@ func (b *builder) device(source string, device netbox.Device, m netboxv1alpha1.D
 		}
 		placement = fleet.Placement{Scope: string(netboxv1alpha1.PlacementScopeRackMembership), RackRef: &fleet.LocalReference{Name: rack.Name}}
 		deps = append(deps, rack.Key())
+	case netboxv1alpha1.PlacementScopeRackUnits:
+		if device.Rack == nil {
+			unresolved(ReasonRackAbsent, "RackUnits placement needs a rack in NetBox")
+			return
+		}
+		rack, ok := b.rackByID[device.Rack.ID]
+		if !ok {
+			unresolved(ReasonDependencyBlocked, "the device's rack is not in the snapshot or is unresolved")
+			return
+		}
+		var problem string
+		if placement, problem = rackUnits(device, dt, rack.Name); problem != "" {
+			unresolved(ReasonRackUnitsUnavailable, problem)
+			return
+		}
+		deps = append(deps, rack.Key())
 	default:
 		facility, reason, message := b.facility(device.Site, device.Location)
 		if facility == "" {
@@ -398,7 +424,16 @@ func (b *builder) device(source string, device netbox.Device, m netboxv1alpha1.D
 		b.record(source, netboxv1alpha1.RecordStateUnresolved, ReasonIdentityUnavailable, message)
 		return
 	}
-	b.add(fleet.KindDevice, source, spec, ref, claimCandidate.Key())
+	if parts := b.parts[device.ID]; parts != nil {
+		if parts.problem != "" {
+			b.record(source, netboxv1alpha1.RecordStateUnresolved, ReasonComponentsInvalid,
+				"the DeviceClaim is planned and the Device is not created, because its components cannot be recorded exactly: "+parts.problem)
+			return
+		}
+		spec.Components = parts.components
+		spec.InternalMappings = parts.mappings
+	}
+	b.deviceByID[device.ID] = b.add(fleet.KindDevice, source, spec, ref, claimCandidate.Key())
 }
 
 // reconcile compares candidates with existing records of the same name and
@@ -592,6 +627,12 @@ func (b *builder) retained() {
 	}
 	for _, d := range b.in.Snapshot.Devices {
 		present[TypeDevice+"/"+strconv.FormatInt(d.ID, 10)] = true
+	}
+	for _, f := range b.in.Snapshot.PowerFeeds {
+		present[TypePowerFeed+"/"+strconv.FormatInt(f.ID, 10)] = true
+	}
+	for _, c := range b.in.Snapshot.Cables {
+		present[TypeCable+"/"+strconv.FormatInt(c.ID, 10)] = true
 	}
 	for _, kind := range fleet.WriteKinds {
 		for i := range b.in.Existing[kind] {

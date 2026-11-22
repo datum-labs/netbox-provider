@@ -1,0 +1,4 @@
+[
+  {"id": 3100, "device": {"id": 1008}, "name": "Outlet 1", "type": {"value": "iec-60320-c13"}, "power_port": {"id": 3010}},
+  {"id": 3101, "device": {"id": 1008}, "name": "Outlet 2", "type": {"value": "iec-60320-c13"}, "power_port": {"id": 3010}}
+]

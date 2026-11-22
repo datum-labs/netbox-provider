@@ -336,8 +336,9 @@ func reservedQueryKey(key string) bool {
 
 func validCollection(collection string) bool {
 	switch collection {
-	case CollectionSites, CollectionLocations, CollectionRacks, CollectionDeviceTypes, CollectionDevices:
+	case CollectionSites, CollectionLocations, CollectionRacks, CollectionDeviceTypes, CollectionDevices,
+		CollectionCables, CollectionPowerPanels, CollectionPowerFeeds:
 		return true
 	}
-	return false
+	return slices.Contains(ComponentCollections, collection)
 }

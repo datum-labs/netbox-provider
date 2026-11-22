@@ -47,7 +47,19 @@ func snapshot(t *testing.T) *netbox.Snapshot {
 		Racks:       load[netbox.Rack](t, netbox.CollectionRacks),
 		DeviceTypes: load[netbox.DeviceType](t, netbox.CollectionDeviceTypes),
 		Devices:     load[netbox.Device](t, netbox.CollectionDevices),
+		Components:  components(t),
+		Cables:      load[netbox.Cable](t, netbox.CollectionCables),
+		PowerPanels: load[netbox.PowerPanel](t, netbox.CollectionPowerPanels),
+		PowerFeeds:  load[netbox.PowerFeed](t, netbox.CollectionPowerFeeds),
 	}
+}
+
+func components(t *testing.T) map[string][]netbox.Component {
+	out := map[string][]netbox.Component{}
+	for _, collection := range netbox.ComponentCollections {
+		out[collection] = load[netbox.Component](t, collection)
+	}
+	return out
 }
 
 func mapping(t *testing.T) netboxv1alpha1.NetBoxMappingSpec {
@@ -144,18 +156,33 @@ func equalJSON(a, b any) bool {
 func TestFixturePlan(t *testing.T) {
 	p := plan.Build(input(t))
 	want := map[string]outcome{
-		"Rack dcim/racks/100":           {plan.ActionCreate, plan.ReasonNew},
-		"DeviceClaim dcim/devices/1000": {plan.ActionCreate, plan.ReasonNew},
-		"Device dcim/devices/1000":      {plan.ActionCreate, plan.ReasonNew},
-		"DeviceClaim dcim/devices/1001": {plan.ActionCreate, plan.ReasonNew},
-		"DeviceClaim dcim/devices/1002": {plan.ActionCreate, plan.ReasonNew},
-		"record dcim/devices/1001":      {"Unresolved", plan.ReasonIdentityUnavailable},
-		"record dcim/devices/1002":      {"Unresolved", plan.ReasonIdentityUnavailable},
-		"record dcim/racks/101":         {"Unresolved", plan.ReasonPremisesUnmapped},
-		"record dcim/devices/1003":      {"Excluded", plan.ReasonExcludedByRole},
-		"record dcim/devices/1004":      {"Unresolved", plan.ReasonDeviceUnmapped},
-		"record dcim/devices/1005":      {"Unresolved", plan.ReasonModelAbsent},
-		"record dcim/devices/1006":      {"Unresolved", plan.ReasonDependencyBlocked},
+		"Rack dcim/racks/100":             {plan.ActionCreate, plan.ReasonNew},
+		"PowerFeed dcim/power-feeds/6000": {plan.ActionCreate, plan.ReasonNew},
+		"DeviceClaim dcim/devices/1000":   {plan.ActionCreate, plan.ReasonNew},
+		"Device dcim/devices/1000":        {plan.ActionCreate, plan.ReasonNew},
+		"DeviceClaim dcim/devices/1001":   {plan.ActionCreate, plan.ReasonNew},
+		"DeviceClaim dcim/devices/1002":   {plan.ActionCreate, plan.ReasonNew},
+		"DeviceClaim dcim/devices/1007":   {plan.ActionCreate, plan.ReasonNew},
+		"Device dcim/devices/1007":        {plan.ActionCreate, plan.ReasonNew},
+		"DeviceClaim dcim/devices/1008":   {plan.ActionCreate, plan.ReasonNew},
+		"Device dcim/devices/1008":        {plan.ActionCreate, plan.ReasonNew},
+		"Cable dcim/cables/5000":          {plan.ActionCreate, plan.ReasonNew},
+		"Cable dcim/cables/5001":          {plan.ActionCreate, plan.ReasonNew},
+		"Cable dcim/cables/5002":          {plan.ActionCreate, plan.ReasonNew},
+		"record dcim/devices/1001":        {"Unresolved", plan.ReasonIdentityUnavailable},
+		"record dcim/devices/1002":        {"Unresolved", plan.ReasonIdentityUnavailable},
+		"record dcim/racks/101":           {"Unresolved", plan.ReasonPremisesUnmapped},
+		"record dcim/devices/1003":        {"Excluded", plan.ReasonExcludedByRole},
+		"record dcim/devices/1004":        {"Unresolved", plan.ReasonDeviceUnmapped},
+		"record dcim/devices/1005":        {"Unresolved", plan.ReasonModelAbsent},
+		"record dcim/devices/1006":        {"Unresolved", plan.ReasonDependencyBlocked},
+		"record dcim/power-feeds/6001":    {"Excluded", plan.ReasonNotInstalled},
+		"record dcim/power-feeds/6002":    {"Unresolved", plan.ReasonPowerPanelAbsent},
+		"record dcim/cables/5003":         {"Unresolved", plan.ReasonEndpointUnavailable},
+		"record dcim/cables/5004":         {"Unresolved", plan.ReasonEndpointUnavailable},
+		"record dcim/cables/5005":         {"Excluded", plan.ReasonNotInstalled},
+		"record dcim/cables/5006":         {"Unresolved", plan.ReasonCableMediumUnreviewed},
+		"record dcim/cables/5007":         {"Unresolved", plan.ReasonEndpointUnsupported},
 	}
 	got := outcomes(p)
 	for k, w := range want {
@@ -206,7 +233,7 @@ func TestFixturePlan(t *testing.T) {
 
 	for _, c := range p.Candidates {
 		encoded, _ := json.Marshal(c.Object.Object)
-		for _, forbidden := range []string{`"provenance"`, "recordedBy", "recordedAt", `"source"`, "sourceIdentity", "Import", `"position"`, `"height"`, `"face"`, `"status"`, `"bmc"`, "must-not-be-retained", "deviceRef", "https://"} {
+		for _, forbidden := range []string{`"provenance"`, "recordedBy", "recordedAt", `"source"`, "sourceIdentity", "sourceRef", "upstreamSources", "Import", `"status"`, `"bmc"`, "must-not-be-retained", "https://"} {
 			if strings.Contains(string(encoded), forbidden) {
 				t.Errorf("%s contains %s", c.Key(), forbidden)
 			}
@@ -370,7 +397,7 @@ func TestRecordsCorrelatedByLabelsAreUnchanged(t *testing.T) {
 		}
 	}
 	p := plan.Build(withExisting(input(t), objs...))
-	if p.Count(plan.ActionUnchanged) != 5 || p.Count(plan.ActionCreate) != 0 {
+	if p.Count(plan.ActionUnchanged) != len(objs) || p.Count(plan.ActionCreate) != 0 {
 		t.Fatalf("outcomes %v", outcomes(p))
 	}
 }

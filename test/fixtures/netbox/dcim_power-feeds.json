@@ -1,0 +1,5 @@
+[
+  {"id": 6000, "name": "Example Feed A", "power_panel": {"id": 7000}, "rack": {"id": 100}, "status": {"value": "active"}, "supply": {"value": "ac"}, "phase": {"value": "single-phase"}, "voltage": 208, "amperage": 30, "comments": "must-not-be-retained"},
+  {"id": 6001, "name": "Example Feed B", "power_panel": {"id": 7000}, "rack": {"id": 100}, "status": {"value": "planned"}, "supply": {"value": "ac"}, "phase": {"value": "single-phase"}, "voltage": 208, "amperage": 30},
+  {"id": 6002, "name": "Example Feed C", "power_panel": {"id": 7001}, "rack": null, "status": {"value": "active"}, "supply": {"value": "dc"}, "phase": null, "voltage": 48, "amperage": 20}
+]

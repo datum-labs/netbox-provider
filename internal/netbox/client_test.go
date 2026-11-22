@@ -297,14 +297,32 @@ func TestSnapshotAllowlistsFieldsAndIsStable(t *testing.T) {
 		t.Fatalf("observedAt %v", first.ObservedAt)
 	}
 	encoded, _ := json.Marshal(first)
-	for _, forbidden := range []string{"must-not-be-retained", "synthetic comment", "https://", "position", "status"} {
+	for _, forbidden := range []string{"must-not-be-retained", "synthetic comment", "https://", "1000BASE-T", "\"Front\"", "mac_address", "comments"} {
 		if strings.Contains(string(encoded), forbidden) {
 			t.Errorf("snapshot retained non-allowlisted content %q", forbidden)
 		}
 	}
 	counts := first.Counts()
-	if counts[netbox.CollectionDevices] != 7 || counts[netbox.CollectionRacks] != 2 || counts[netbox.CollectionDeviceTypes] != 3 {
+	if counts[netbox.CollectionDevices] != 9 || counts[netbox.CollectionRacks] != 2 || counts[netbox.CollectionDeviceTypes] != 5 ||
+		counts[netbox.CollectionInterfaces] != 9 || counts[netbox.CollectionPowerOutlets] != 2 || counts[netbox.CollectionCables] != 8 ||
+		counts[netbox.CollectionPowerFeeds] != 3 || counts[netbox.CollectionPowerPanels] != 1 || counts[netbox.CollectionRearPorts] != 0 {
 		t.Fatalf("counts %v", counts)
+	}
+	outlet := first.Components[netbox.CollectionPowerOutlets][0]
+	if outlet.Device == nil || outlet.Device.ID != 1008 || outlet.PowerPort == nil || outlet.PowerPort.ID != 3010 || netbox.ChoiceValue(outlet.Type) != "iec-60320-c13" {
+		t.Errorf("power outlet decoded as %+v", outlet)
+	}
+	cable := first.Cables[0]
+	if cable.Type != "dac-passive" || netbox.ChoiceValue(cable.Status) != "connected" || len(cable.ATerminations) != 1 ||
+		cable.ATerminations[0] != (netbox.Termination{ObjectType: "dcim.interface", ObjectID: 2001}) {
+		t.Errorf("cable decoded as %+v", cable)
+	}
+	if first.Cables[1].Type != "" {
+		t.Error("a null cable type was not decoded as empty")
+	}
+	feed := first.PowerFeeds[0]
+	if feed.PowerPanel == nil || feed.PowerPanel.ID != 7000 || netbox.ChoiceValue(feed.Supply) != "ac" || feed.Voltage == nil || *feed.Voltage != 208 {
+		t.Errorf("power feed decoded as %+v", feed)
 	}
 	byID := map[int64]netbox.Device{}
 	for _, d := range first.Devices {
@@ -326,7 +344,7 @@ func TestSnapshotAllowlistsFieldsAndIsStable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(scoped.Sites) != 1 || len(scoped.Devices) != 1 || len(scoped.Racks) != 1 || len(scoped.DeviceTypes) != 3 {
+	if len(scoped.Sites) != 1 || len(scoped.Devices) != 1 || len(scoped.Racks) != 1 || len(scoped.DeviceTypes) != 5 {
 		t.Fatalf("scope not applied: sites=%d devices=%d racks=%d", len(scoped.Sites), len(scoped.Devices), len(scoped.Racks))
 	}
 	for _, auth := range server.Authorizations() {

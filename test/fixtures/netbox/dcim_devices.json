@@ -5,5 +5,7 @@
   {"id": 1003, "name": "example-vm-a", "device_type": {"id": 502}, "role": {"id": 9, "slug": "hosted-vm"}, "site": {"id": 1}, "location": null, "rack": null, "serial": "", "asset_tag": null},
   {"id": 1004, "name": "example-server-unreviewed", "device_type": {"id": 500}, "role": {"id": 7, "slug": "server"}, "site": {"id": 1}, "location": {"id": 10}, "rack": {"id": 100}, "serial": "SYNTH-CHASSIS-0004", "asset_tag": null},
   {"id": 1005, "name": "example-server-no-model", "device_type": {"id": 501}, "role": {"id": 7, "slug": "server"}, "site": {"id": 1}, "location": {"id": 10}, "rack": {"id": 100}, "serial": "", "asset_tag": null},
-  {"id": 1006, "name": "example-server-unmapped-rack", "device_type": {"id": 500}, "role": {"id": 7, "slug": "server"}, "site": {"id": 2}, "location": null, "rack": {"id": 101}, "serial": "SYNTH-CHASSIS-0006", "asset_tag": null}
+  {"id": 1006, "name": "example-server-unmapped-rack", "device_type": {"id": 500}, "role": {"id": 7, "slug": "server"}, "site": {"id": 2}, "location": null, "rack": {"id": 101}, "serial": "SYNTH-CHASSIS-0006", "asset_tag": null},
+  {"id": 1007, "name": "example-switch-a", "device_type": {"id": 503}, "role": {"id": 8, "slug": "switch"}, "site": {"id": 1}, "location": {"id": 10}, "rack": {"id": 100}, "position": 40, "face": {"value": "front", "label": "Front"}, "serial": "SYNTH-CHASSIS-0007", "asset_tag": null, "status": {"value": "active"}},
+  {"id": 1008, "name": "example-pdu-a", "device_type": {"id": 504}, "role": {"id": 10, "slug": "pdu"}, "site": {"id": 1}, "location": {"id": 10}, "rack": {"id": 100}, "position": null, "face": null, "serial": "SYNTH-CHASSIS-0008", "asset_tag": null, "status": {"value": "active"}}
 ]

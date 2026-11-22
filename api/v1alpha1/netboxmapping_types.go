@@ -62,9 +62,8 @@ const (
 	SerialMeaningUnknown SerialMeaning = "Unknown"
 )
 
-// PlacementScope is the placement precision an import may assert. Exact rack
-// units are never imported.
-// +kubebuilder:validation:Enum=Facility;RackMembership
+// PlacementScope is the placement precision an import may assert.
+// +kubebuilder:validation:Enum=Facility;RackMembership;RackUnits
 type PlacementScope string
 
 const (
@@ -72,7 +71,37 @@ const (
 	PlacementScopeFacility PlacementScope = "Facility"
 	// PlacementScopeRackMembership asserts the rack, not a position.
 	PlacementScopeRackMembership PlacementScope = "RackMembership"
+	// PlacementScopeRackUnits asserts the rack units NetBox records: the
+	// device's position and face, and its device type's height. A device
+	// without all three, or with a fractional height, stays unresolved;
+	// rack units are never inferred.
+	PlacementScopeRackUnits PlacementScope = "RackUnits"
 )
+
+// CableMedium is the reviewed medium of a data cable.
+// +kubebuilder:validation:Enum=Copper;Fiber;Unknown
+type CableMedium string
+
+const (
+	CableMediumCopper  CableMedium = "Copper"
+	CableMediumFiber   CableMedium = "Fiber"
+	CableMediumUnknown CableMedium = "Unknown"
+)
+
+// CableMediumRule gives the medium of data cables of some NetBox cable types.
+type CableMediumRule struct {
+	// CableTypes are NetBox cable type values, such as cat6 or smf.
+	//
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=64
+	// +listType=set
+	CableTypes []string `json:"cableTypes"`
+
+	// Medium is the Fleet medium of those cables.
+	Medium CableMedium `json:"medium"`
+}
 
 // DeviceMapping is the reviewed interpretation of one NetBox device.
 //
@@ -154,6 +183,20 @@ type NetBoxMappingSpec struct {
 	// +kubebuilder:validation:MaxItems=64
 	// +optional
 	Exclusions []RoleExclusion `json:"exclusions,omitempty"`
+
+	// CableMedia gives the reviewed medium of data cables by NetBox cable
+	// type. Power and console cables take their medium from the components
+	// they connect. A data cable whose type has no rule stays unresolved.
+	//
+	// +kubebuilder:validation:MaxItems=64
+	// +optional
+	CableMedia []CableMediumRule `json:"cableMedia,omitempty"`
+
+	// UntypedCableMedium is the medium of data cables that have no NetBox
+	// cable type. When unset, they stay unresolved.
+	//
+	// +optional
+	UntypedCableMedium CableMedium `json:"untypedCableMedium,omitempty"`
 }
 
 // NetBoxMapping holds reviewed import decisions for a NetBoxSource.
