@@ -16,7 +16,8 @@ The schema is Fleet's target inventory schema from
 | --- | --- | --- |
 | [datum-cloud/fleet#105](https://github.com/datum-cloud/fleet/pull/105) | Merged | Makes record-authorship metadata optional, so records without it are admitted. |
 | [datum-cloud/fleet#106](https://github.com/datum-cloud/fleet/pull/106) | Merged | The target schema: removes record-authorship metadata, component source references and Fleet's NetBox import support. A Device's identity needs a serial or system UUID. |
-| [datum-cloud/fleet#101](https://github.com/datum-cloud/fleet/pull/101) | Merged | The importer role below. It grants `create` only; server-side apply also needs `patch`. |
+| [datum-cloud/fleet#101](https://github.com/datum-cloud/fleet/pull/101) | Merged | The importer role below. |
+| [datum-cloud/fleet#134](https://github.com/datum-cloud/fleet/pull/134) | Merged | Adds `patch` to the importer role on every inventory kind, for server-side apply. |
 | [datum-cloud/fleet#110](https://github.com/datum-cloud/fleet/pull/110) | Merged | `identity.unidentified` and `identity.unidentifiedReason`: a Device with no recorded hardware identity. A Fleet deployment without it rejects such Devices, so they are quarantined and their cables blocked. |
 
 A Fleet deployment older than #105 requires authorship metadata that this
@@ -109,15 +110,13 @@ spec:
     - fleet.datumapis.com/powerfeeds.create
 ```
 
-The role inherits the viewer role, adds `create` on all seven physical kinds,
-and grants no update, patch, delete or status verbs. That is not enough for
-server-side apply. **Proposed Fleet change:** add `patch` on Racks,
-PowerFeeds, DeviceClaims, Devices and Cables, keeping it free of `update`,
-`delete` and status verbs, so the role can still only add and adjust records,
-never remove them. Until Fleet ships that, an environment grants the same
-verbs itself. This controller uses `create` and `patch` on those five kinds
-only; it never writes Facilities or Sites, even though the role would allow
-creating them.
+The role inherits the viewer role and adds `create` on all seven physical
+kinds. datum-cloud/fleet#134 adds `patch` on every inventory kind, for
+server-side apply; the role still grants no `update`, `delete` or status
+verbs, so it can add and adjust records but never remove them. The YAML above
+is the role as #101 introduced it. This controller uses `create` and `patch`
+on Racks, PowerFeeds, DeviceClaims, Devices and Cables only; it never writes
+Facilities or Sites, even though the role would allow it.
 
 This controller's own kinds stay on the cluster it runs on and are not
 registered in Milo, so Fleet needs no ProtectedResources for them.

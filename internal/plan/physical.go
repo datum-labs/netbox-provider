@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"net/url"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"strconv"
@@ -282,6 +283,33 @@ func bmcEndpoint(device netbox.Device, ips map[int64]netbox.IPAddress, vrfs map[
 		}
 	}
 	return "https://" + net.JoinHostPort(addr.String(), bmcPort), ""
+}
+
+// endpointKey normalizes a BMC endpoint for comparison: the host, with an IP
+// literal canonicalized and a hostname lowercased, and the port, with the
+// scheme's default filled in. The path is ignored. A hostname is compared only
+// with the same hostname: it is never resolved, so a hostname and an IP
+// literal for the same BMC are not detected as one.
+func endpointKey(endpoint string) (string, bool) {
+	u, err := url.Parse(strings.TrimSpace(endpoint))
+	if err != nil || u.Hostname() == "" {
+		return "", false
+	}
+	port := u.Port()
+	if port == "" {
+		switch strings.ToLower(u.Scheme) {
+		case "https":
+			port = "443"
+		case "http":
+			port = "80"
+		default:
+			return "", false
+		}
+	}
+	if addr, err := netip.ParseAddr(u.Hostname()); err == nil {
+		return net.JoinHostPort(addr.Unmap().WithZone("").String(), port), true
+	}
+	return "host " + strings.TrimSuffix(strings.ToLower(u.Hostname()), ".") + ":" + port, true
 }
 
 // rackUnits returns RackUnits placement for a device, or a reason it cannot

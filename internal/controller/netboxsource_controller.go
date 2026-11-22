@@ -386,10 +386,19 @@ func (r *NetBoxSourceReconciler) apply(ctx context.Context, p *plan.Plan) (int, 
 			switch {
 			case err == nil && creating && appliedOver(obj):
 				// Another writer created this name between observation and
-				// apply. The record is reported, never treated as ours.
+				// apply, and the apply merged into it. Server-side apply has no
+				// create-only precondition, so the write is undone instead:
+				// applying an empty configuration releases every field only
+				// this controller owned, leaving the record as its writer made it.
 				c.Action, c.Reason = plan.ActionQuarantined, plan.ReasonNameConflict
-				c.Message = "another writer created this record while it was being applied; review it, it is not this controller's"
-				blocked[c.Key()] = false
+				if releaseErr := r.release(ctx, obj); releaseErr != nil {
+					blocked[c.Key()] = true
+					uncertain++
+					c.Message = "another writer created this record while it was being applied, and releasing this controller's fields failed; review it: " + truncate(apiMessage(releaseErr), 160)
+				} else {
+					blocked[c.Key()] = false
+					c.Message = "another writer created this record while it was being applied; this controller's fields were released, and it is not adopted"
+				}
 				logger.Info("applied over a record another writer created", "kind", kind, "name", c.Name)
 			case err == nil && creating:
 				c.Action, c.Reason, c.Message = actionCreated, "Created", ""
@@ -401,6 +410,12 @@ func (r *NetBoxSourceReconciler) apply(ctx context.Context, p *plan.Plan) (int, 
 				c.Action, c.Reason, c.Message = plan.ActionQuarantined, plan.ReasonApplyConflict, truncate(conflictMessage(err), 256)
 				blocked[c.Key()] = false
 				logger.Info("apply conflict; ownership is never forced", "kind", kind, "name", c.Name, "conflicts", conflictMessage(err))
+			case !creating && isUIDMismatch(err):
+				// The record was deleted or replaced after it was observed. The
+				// UID precondition kept the apply off the replacement.
+				blocked[c.Key()] = true
+				c.Message = "the record was replaced or deleted after it was observed; re-observed before any retry"
+				uncertain++
 			case apierrors.IsInvalid(err) || apierrors.IsForbidden(err) || apierrors.IsBadRequest(err):
 				// A definite rejection: nothing was written.
 				reason := "Rejected"
@@ -418,6 +433,29 @@ func (r *NetBoxSourceReconciler) apply(ctx context.Context, p *plan.Plan) (int, 
 		}
 	}
 	return created, updated, uncertain
+}
+
+// release applies an empty configuration as plan.FieldManager to the record
+// it just wrote, preconditioned on its UID, so server-side apply removes every
+// field only this controller owned. Fields another writer also owns stay theirs.
+func (r *NetBoxSourceReconciler) release(ctx context.Context, written *unstructured.Unstructured) error {
+	empty := &unstructured.Unstructured{}
+	empty.SetGroupVersionKind(written.GroupVersionKind())
+	empty.SetNamespace(written.GetNamespace())
+	empty.SetName(written.GetName())
+	empty.SetUID(written.GetUID())
+	return r.Fleet.Apply(ctx, client.ApplyConfigurationFromUnstructured(empty), client.FieldOwner(plan.FieldManager))
+}
+
+// isUIDMismatch reports a rejected UID precondition: the record is gone, or
+// another record now has its name.
+func isUIDMismatch(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := apiMessage(err)
+	return (apierrors.IsConflict(err) && strings.Contains(message, "uid mismatch")) ||
+		(apierrors.IsInvalid(err) && strings.Contains(message, "metadata.uid"))
 }
 
 // appliedOver reports whether a create apply landed on a record that other

@@ -4,3 +4,6 @@ package plan
 
 // BMCEndpoint exposes bmcEndpoint to the external tests.
 var BMCEndpoint = bmcEndpoint
+
+// EndpointKey exposes endpointKey to the external tests.
+var EndpointKey = endpointKey

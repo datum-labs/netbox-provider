@@ -1,5 +1,7 @@
-# Same-cluster stand-in for the proposed Milo importer role: read Facilities,
-# read and create Racks, DeviceClaims and Devices. No update, patch or delete.
+# Same-cluster stand-in for the Milo importer role: read the inventory kinds
+# the controller lists, and write the ones it imports by server-side apply,
+# which needs create for a record's first apply and patch for later ones.
+# No update, delete or status access.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata: {name: netbox-provider-standalone-importer, namespace: netbox-inventory}
@@ -8,8 +10,8 @@ rules:
     resources: [facilities]
     verbs: [get, list]
   - apiGroups: [fleet.datumapis.com]
-    resources: [racks, deviceclaims, devices]
-    verbs: [get, list, create]
+    resources: [racks, powerfeeds, deviceclaims, devices, cables]
+    verbs: [get, list, create, patch]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
