@@ -95,6 +95,13 @@ type Candidate struct {
 	// ExistingUID is the UID of the record an Update applies to. The apply
 	// carries it as a precondition, so it never lands on a replacement.
 	ExistingUID types.UID
+	// Interim, when set, is applied before Object. It is a Device Update that
+	// keeps the components whose IDs Object drops while existing Cables in
+	// Holders still name them. Object is applied only after every holder is
+	// written, so no Cable names a component its Device no longer has.
+	Interim *unstructured.Unstructured
+	// Holders are the Kind/name keys of the Cable Updates Object waits for.
+	Holders []string
 }
 
 // FieldManager is the server-side apply field manager of every write.
@@ -229,6 +236,7 @@ func Build(in Input) *Plan {
 	}
 	b.collisions()
 	b.propagate()
+	b.interims()
 	b.retained()
 	return b.plan
 }
@@ -788,6 +796,116 @@ func (b *builder) propagate() {
 			}
 		}
 	}
+}
+
+// interims stages Device Updates that drop component IDs existing Cables
+// still name, such as when components move from instance IDs to template IDs.
+// Cables are applied after Devices, so applying the Device alone would leave
+// those Cables naming missing components until they are applied. Instead the
+// Device first gets an interim apply with both the new components and the old
+// ones the Cables name, then the Cables, then the planned Device, which drops
+// the old components. Only Cable Updates in this plan are waited for: an
+// existing Cable this plan does not write cannot move, and is named in the
+// Device's message instead. A Device whose interim would exceed Fleet's
+// component limit is applied in one step, and its Cables name missing
+// components until they are applied later in the same reconcile.
+func (b *builder) interims() {
+	updating := map[string]bool{}
+	for _, c := range b.plan.Candidates {
+		if c.Kind == fleet.KindCable && c.Action == ActionUpdate {
+			updating[c.Key()] = true
+		}
+	}
+	// named maps Device name/component ID to the existing Cables naming it.
+	named := map[string][]string{}
+	for i := range b.in.Existing[fleet.KindCable] {
+		cable := &b.in.Existing[fleet.KindCable][i]
+		lanes, _, _ := unstructured.NestedSlice(cable.Object, "spec", "lanes")
+		for _, lane := range lanes {
+			for _, side := range []string{"a", "b"} {
+				device, _, _ := unstructured.NestedString(asMap(lane), side, "deviceRef", "name")
+				id, _, _ := unstructured.NestedString(asMap(lane), side, "componentID")
+				if device != "" {
+					named[device+"/"+id] = append(named[device+"/"+id], fleet.KindCable+"/"+cable.GetName())
+				}
+			}
+		}
+	}
+	existing := map[string]*unstructured.Unstructured{}
+	for i := range b.in.Existing[fleet.KindDevice] {
+		existing[b.in.Existing[fleet.KindDevice][i].GetName()] = &b.in.Existing[fleet.KindDevice][i]
+	}
+	for _, c := range b.plan.Candidates {
+		current := existing[c.Name]
+		if c.Kind != fleet.KindDevice || c.Action != ActionUpdate || current == nil {
+			continue
+		}
+		planned, _, _ := unstructured.NestedSlice(c.Object.Object, "spec", "components")
+		kept := map[string]bool{}
+		for _, comp := range planned {
+			id, _ := asMap(comp)["id"].(string)
+			kept[id] = true
+		}
+		var keep []any
+		holders, stranded := map[string]bool{}, map[string]bool{}
+		previous, _, _ := unstructured.NestedSlice(current.Object, "spec", "components")
+		for _, comp := range previous {
+			id, _ := asMap(comp)["id"].(string)
+			if kept[id] {
+				continue
+			}
+			waits := false
+			for _, cable := range named[c.Name+"/"+id] {
+				if updating[cable] {
+					holders[cable], waits = true, true
+				} else {
+					stranded[cable] = true
+				}
+			}
+			if waits {
+				keep = append(keep, writtenComponent(comp))
+			}
+		}
+		if len(stranded) > 0 {
+			c.Message = strings.TrimPrefix(c.Message+"; "+fmt.Sprintf("existing Cables %s, which this plan does not write, still name components this update removes", strings.Join(sortedKeys(stranded), ", ")), "; ")
+		}
+		if len(keep) == 0 {
+			continue
+		}
+		if len(planned)+len(keep) > maxComponents {
+			c.Message = strings.TrimPrefix(c.Message+"; "+"the Device is applied in one step: keeping the components its Cables name until they move would exceed Fleet's component limit", "; ")
+			continue
+		}
+		interim := c.Object.DeepCopy()
+		_ = unstructured.SetNestedSlice(interim.Object, append(append([]any{}, planned...), keep...), "spec", "components")
+		c.Interim, c.Holders = interim, sortedKeys(holders)
+	}
+}
+
+// writtenComponent returns the fields of an existing component that this
+// controller writes, so an interim apply never claims another writer's field.
+func writtenComponent(v any) any {
+	var c fleet.Component
+	data, _ := json.Marshal(v)
+	_ = json.Unmarshal(data, &c)
+	out := map[string]any{}
+	data, _ = json.Marshal(c)
+	_ = json.Unmarshal(data, &out)
+	return out
+}
+
+func asMap(v any) map[string]any {
+	m, _ := v.(map[string]any)
+	return m
+}
+
+func sortedKeys(set map[string]bool) []string {
+	out := make([]string, 0, len(set))
+	for k := range set {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func (b *builder) retained() {

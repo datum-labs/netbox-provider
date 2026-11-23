@@ -41,7 +41,8 @@ func TestComponentsAndInternalMappings(t *testing.T) {
 	for _, c := range components {
 		ids = append(ids, c.(map[string]any)["id"].(string))
 	}
-	if !equalJSON(ids, []string{"interfaces-2000", "interfaces-2001", "power-ports-3000"}) {
+	// Each component takes the ID of the device type's template it was made from.
+	if !equalJSON(ids, []string{"interface-templates-700", "interface-templates-701", "power-port-templates-710"}) {
 		t.Errorf("server components %v; logical interfaces are not components", ids)
 	}
 	eth0 := components[0].(map[string]any)
@@ -274,7 +275,7 @@ func TestCablesToUnidentifiedDevicesAreCreatable(t *testing.T) {
 	cable := candidate(t, p, fleet.KindCable, "dcim/cables/5008")
 	lane := field(t, cable, "lanes").([]any)[0].(map[string]any)
 	if cable.Action != plan.ActionCreate || lane["a"].(map[string]any)["deviceRef"].(map[string]any)["name"] != unidentified.Name ||
-		lane["a"].(map[string]any)["componentID"] != "interfaces-2020" {
+		lane["a"].(map[string]any)["componentID"] != "interface-templates-700" {
 		t.Fatalf("cable %s %v", cable.Action, lane)
 	}
 	found := false
@@ -291,11 +292,12 @@ func TestCablesToUnidentifiedDevicesAreCreatable(t *testing.T) {
 }
 
 func TestFrontPortPositionMappings(t *testing.T) {
-	// NetBox 4.5 and later maps each front port position separately.
+	// NetBox 4.5 and later maps each front port position separately. The rear
+	// port was made from a template and the front port was not.
 	sw := candidate(t, plan.Build(input(t)), fleet.KindDevice, "dcim/devices/1007")
 	want := []any{
-		map[string]any{"from": map[string]any{"componentID": "front-ports-2101", "position": float64(1)}, "to": map[string]any{"componentID": "rear-ports-2100", "position": float64(1)}},
-		map[string]any{"from": map[string]any{"componentID": "front-ports-2101", "position": float64(2)}, "to": map[string]any{"componentID": "rear-ports-2100", "position": float64(2)}},
+		map[string]any{"from": map[string]any{"componentID": "front-ports-2101", "position": float64(1)}, "to": map[string]any{"componentID": "rear-port-templates-720", "position": float64(1)}},
+		map[string]any{"from": map[string]any{"componentID": "front-ports-2101", "position": float64(2)}, "to": map[string]any{"componentID": "rear-port-templates-720", "position": float64(2)}},
 	}
 	if !equalJSON(field(t, sw, "internalMappings"), want) {
 		t.Fatalf("internal mappings %v", field(t, sw, "internalMappings"))

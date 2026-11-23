@@ -371,12 +371,18 @@ func (r *NetBoxSourceReconciler) observeFleet(ctx context.Context, namespace str
 // A create that lands on a record another writer made is undone by releasing
 // this controller's fields. A release that fails is recorded in
 // status.pendingReleases at once and retried by later reconciles.
+//
+// A Device Update with an interim is applied in two steps. The interim, which
+// keeps the old components its existing Cables name, is applied in dependency
+// order. The planned Device follows once every Cable it waits for is written.
+// If one is not, the interim stays until a later reconcile writes it.
 func (r *NetBoxSourceReconciler) apply(ctx context.Context, source *netboxv1alpha1.NetBoxSource, p *plan.Plan) (int, int, int) {
 	logger := log.FromContext(ctx)
 	created, updated, uncertain := 0, 0, 0
 	// blocked maps a target key to true when its write outcome is unknown
 	// and false when it definitely was not written.
 	blocked := map[string]bool{}
+	var staged []*plan.Candidate
 	for _, kind := range fleet.WriteKinds {
 		for _, c := range p.Candidates {
 			if c.Kind != kind || (c.Action != plan.ActionCreate && c.Action != plan.ActionUpdate) {
@@ -407,6 +413,10 @@ func (r *NetBoxSourceReconciler) apply(ctx context.Context, source *netboxv1alph
 				continue
 			}
 			obj := c.Object.DeepCopy()
+			if c.Interim != nil && !creating {
+				obj = c.Interim.DeepCopy()
+				staged = append(staged, c)
+			}
 			if !creating {
 				obj.SetUID(c.ExistingUID)
 			}
@@ -471,7 +481,48 @@ func (r *NetBoxSourceReconciler) apply(ctx context.Context, source *netboxv1alph
 			}
 		}
 	}
-	return created, updated, uncertain
+	return created, updated, uncertain + r.completeStaged(ctx, p, staged)
+}
+
+// completeStaged applies the planned Device of each interim that was written,
+// once every Cable it waits for is written, and returns how many of those
+// writes have an unknown outcome.
+func (r *NetBoxSourceReconciler) completeStaged(ctx context.Context, p *plan.Plan, staged []*plan.Candidate) int {
+	byKey := map[string]*plan.Candidate{}
+	for _, c := range p.Candidates {
+		byKey[c.Key()] = c
+	}
+	uncertain := 0
+	for _, c := range staged {
+		if c.Action != actionUpdated {
+			continue
+		}
+		waiting := ""
+		for _, key := range c.Holders {
+			if h := byKey[key]; h == nil || h.Action != actionUpdated {
+				waiting = key
+				break
+			}
+		}
+		if waiting != "" {
+			c.Message = "keeps the old components that " + waiting + " still names until that Cable is written"
+			continue
+		}
+		obj := c.Object.DeepCopy()
+		obj.SetUID(c.ExistingUID)
+		err := r.Fleet.Apply(ctx, client.ApplyConfigurationFromUnstructured(obj), client.FieldOwner(plan.FieldManager))
+		switch {
+		case err == nil:
+		case isFieldManagerConflict(err):
+			c.Action, c.Reason, c.Message = plan.ActionQuarantined, plan.ReasonApplyConflict, truncate(conflictMessage(err), 256)
+		case !isUIDMismatch(err) && (apierrors.IsInvalid(err) || apierrors.IsForbidden(err) || apierrors.IsBadRequest(err)):
+			c.Action, c.Reason, c.Message = plan.ActionQuarantined, "Rejected", truncate(apiMessage(err), 256)
+		default:
+			c.Message = "the interim components were written and removing them has an unknown outcome: " + truncate(apiMessage(err), 160)
+			uncertain++
+		}
+	}
+	return uncertain
 }
 
 // retryReleases retries each release in status.pendingReleases when write is
