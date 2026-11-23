@@ -350,6 +350,30 @@ annotations, which would then no longer say which observation the owned
 fields came from. A field another writer forced away is seen as drift, and its
 re-apply conflicts and is quarantined.
 
+**Other managers' fields and items are not drift.** The value check ignores
+what other managers added, because server-side apply keeps it through every
+apply this controller makes. Objects compare field by field. Lists that Fleet's
+CRD declares as map-lists (`x-kubernetes-list-type: map`, listed with their
+keys in `fleet.MapLists`) compare item by item by their keys, in any order.
+Each item this controller plans must exist with the same key, and its planned
+fields must be present and equal. Extra fields on that item, such as a layout
+writer's `face` and `layout` on a DeviceType's component templates or an
+operator's `assetTag` on a Device component, are other managers' fields.
+Atomic lists, sets and scalars must still be equal.
+
+A live item the plan does not name is drift only if this controller owns it,
+read from the `k:{...}` entries of its server-side apply in the record's
+managed fields. An item only other managers own is theirs and is never
+compared. An item this controller owns is drift, because applying without it
+is how a removal in NetBox reaches Fleet. The applied digest alone would not
+catch every such item: a Device's interim apply during the move to template
+IDs (see **Migration** below) carries the planned digest while it keeps old
+components, which must still go once their Cables move. When this
+controller's managed fields are missing or unreadable, ownership is unknown
+and every extra item is drift, since re-applying is always safe. A test checks
+`fleet.MapLists` against the vendored CRD, so a new map-list in Fleet's schema
+fails the suite until it is listed.
+
 **Migration.** Because owned fields follow NetBox, a record this controller
 applied gains what later versions map:
 
@@ -390,6 +414,7 @@ fixed budget.
 | Observe by default; writes need explicit opt-in | CRD default `mode: Observe`; apply only runs in `Create` | `observes only by default`, `defaults to observe-only` |
 | Writes are non-forced server-side applies | The reconciler only calls `Apply` with field manager `netbox-provider`; tests wrap the Fleet client and fail on create, update, non-apply patch, delete, any status write, a forced apply, or another field manager | every reconcile spec |
 | Another writer's fields are kept, never taken | An apply conflict is `Quarantined/ApplyConflict`, naming the manager and field paths; other managers' fields survive applies | `keeps another manager's field`, `quarantines a conflict with another manager` |
+| Other managers' fields and items on map-lists are not drift | Map-list items compare by key; an unplanned item is drift only when this controller's managed fields own it | `TestOtherWritersFieldsOnMapListItemsAreUnchanged`, `TestOwnedFieldOnAMapListItemStillUpdatesBesideOtherWritersFields`, `TestUnwantedItemThisControllerOwnsUpdatesButAnotherWritersItemDoesNot`, `TestExtraItemsCountAsDriftWhenOwnershipIsUnknown`, `TestAtomicListsStayStrict`, `keeps the old components while a Cable that names them is not written`, `TestMapListsMatchTheVendoredCRD`, `are not drift: a reconcile after another manager adds layout fields writes nothing and keeps them`, `still removes an item NetBox dropped, and keeps an item only another manager owns` |
 | Immutable fields stay immutable | A Device's identity or claim, or a claim's placement or lifecycle, that changes in NetBox is `Quarantined/ImmutableChanged` before any call | `quarantines a change to an immutable field`, `TestImmutableChangesAreQuarantined` |
 | Catalog records are never duplicated or rebound | A Manufacturer or DeviceType that another writer's record already describes is `Quarantined/CatalogDuplicate`; colliding model keys and canonical names are quarantined; a Device keeps its `deviceTypeRef` and is quarantined if NetBox moves it to another type | `TestOperatorWrittenCatalogRecordsAreNeverAdopted`, `TestDuplicatesAppearingAfterOursQuarantineOurs`, `TestManufacturersDifferingOnlyInCaseAreQuarantined`, `TestModelKeyCollisionsAreQuarantined`, `TestImmutableCatalogChangesAreQuarantined`, `TestDeviceTypeRefsAreAddedLaterAndNeverRemoved`, `adds deviceTypeRef to Devices it applied` |
 | A create that lands on another writer's record is undone | The controller releases its fields at once; a failed release is recorded in `status.pendingReleases`, retried on every Create-mode reconcile, and its record stays `Quarantined/NameConflict` with `Ready=Unknown` until the release succeeds | `releases every field it applied to a record another writer created, and adopts nothing`, `retries a failed release on later reconciles and holds the record until it succeeds` |

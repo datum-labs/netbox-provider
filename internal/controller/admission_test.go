@@ -28,7 +28,7 @@ import (
 
 // vendoredFleetCRDDigest is recorded in test/fleet/README.md with its source
 // commit. Re-vendoring must update both.
-const vendoredFleetCRDDigest = "023ae431bfd9ff566fa511a64b7bdc247c1bd0a0d4ae912e014a07bf21848f45"
+const vendoredFleetCRDDigest = "6609923b6df7743d75861eb62edffb9a96d47b2ddab2c6a548404f0c7be8d971"
 
 var _ = Describe("Fleet admission of generated records", func() {
 	It("uses the recorded vendored Fleet CRD", func() {

@@ -587,7 +587,8 @@ func (b *builder) reconcile(include func(*Candidate) bool) {
 // another writer and is never adopted. A change to a field Fleet keeps
 // immutable is quarantined before any write. Otherwise the record is Unchanged
 // when the last applied digest and every applied value match, and Update when
-// a field this controller owns differs.
+// a field this controller owns differs. Fields and map-list items other
+// managers added are not differences; see covers.
 func Compare(current, candidate *unstructured.Unstructured) (Action, string, string) {
 	want, _ := KeyOf(candidate)
 	got, ok := KeyOf(current)
@@ -606,8 +607,9 @@ func Compare(current, candidate *unstructured.Unstructured) (Action, string, str
 	if message := immutableChange(candidate.GetKind(), current, candidate); message != "" {
 		return ActionQuarantined, ReasonImmutableChanged, message
 	}
+	lists := fleet.MapLists[candidate.GetKind()]
 	if current.GetAnnotations()[AnnotationAppliedDigest] == candidate.GetAnnotations()[AnnotationAppliedDigest] &&
-		subset(normalize(candidate.Object["spec"]), normalize(current.Object["spec"])) {
+		covers(lists, ownedItems(current, FieldManager, lists), "spec", normalize(candidate.Object["spec"]), normalize(current.Object["spec"])) {
 		return ActionUnchanged, ReasonUnchanged, ""
 	}
 	return ActionUpdate, ReasonOwnedFieldsChanged, "a field this controller owns differs from NetBox; it is re-applied"
@@ -657,18 +659,40 @@ func normalize(v any) map[string]any {
 	return out
 }
 
-// subset reports whether every field of want is in got with an equal value.
-// Lists must be equal.
-func subset(want, got map[string]any) bool {
+// covers reports whether the live object at path holds everything this
+// controller wants there, ignoring what other managers added. Objects compare
+// field by field. Lists Fleet declares as map-lists compare item by item by
+// their list-map keys, in any order: each wanted item must exist with the same
+// key and be covered by the live item. A live item the candidate does not name
+// is a difference only if this controller owns it, because applying without it
+// is how a removal reaches Fleet; items only other managers own are theirs.
+// Every other list, including sets, and every scalar must be equal.
+//
+// The applied digest alone does not catch every unwanted item: a Device's
+// interim apply (see interims) carries the planned digest but keeps old
+// components, which must go once their Cables move. So ownership is read from
+// managed fields. owned holds, per map-list path, the keys of the items this
+// controller's apply owns; nil means ownership is unknown, and then every
+// unwanted live item is a difference, since re-applying is always safe.
+func covers(lists map[string][]string, owned map[string]map[string]bool, path string, want, got map[string]any) bool {
 	for key, w := range want {
 		g, ok := got[key]
 		if !ok {
 			return false
 		}
+		at := path + "." + key
 		wm, wIsMap := w.(map[string]any)
 		gm, gIsMap := g.(map[string]any)
 		if wIsMap && gIsMap {
-			if !subset(wm, gm) {
+			if !covers(lists, owned, at, wm, gm) {
+				return false
+			}
+			continue
+		}
+		ws, wIsList := w.([]any)
+		gs, gIsList := g.([]any)
+		if keys := lists[at]; keys != nil && wIsList && gIsList {
+			if !coversItems(keys, owned, at, ws, gs) {
 				return false
 			}
 			continue
@@ -678,6 +702,99 @@ func subset(want, got map[string]any) bool {
 		}
 	}
 	return true
+}
+
+// coversItems compares one map-list. Items inside it compare as objects with
+// no map-lists of their own: Fleet declares none below another list. A list
+// with an item missing a key field compares whole.
+func coversItems(keys []string, owned map[string]map[string]bool, path string, want, got []any) bool {
+	live := map[string]map[string]any{}
+	for _, item := range got {
+		m, ok := item.(map[string]any)
+		key, keyed := itemKey(m, keys)
+		if !ok || !keyed {
+			return reflect.DeepEqual(want, got)
+		}
+		live[key] = m
+	}
+	wanted := map[string]bool{}
+	for _, item := range want {
+		m, ok := item.(map[string]any)
+		key, keyed := itemKey(m, keys)
+		if !ok || !keyed {
+			return reflect.DeepEqual(want, got)
+		}
+		wanted[key] = true
+		g, found := live[key]
+		if !found || !covers(nil, nil, path+"[]", m, g) {
+			return false
+		}
+	}
+	for key := range live {
+		if !wanted[key] && (owned == nil || owned[path][key]) {
+			return false
+		}
+	}
+	return true
+}
+
+// itemKey is a map-list item's key fields as canonical JSON, the form
+// ownedItems reads from managed fields. It is false when a key field is
+// missing.
+func itemKey(item map[string]any, keys []string) (string, bool) {
+	fields := map[string]any{}
+	for _, k := range keys {
+		v, ok := item[k]
+		if !ok {
+			return "", false
+		}
+		fields[k] = v
+	}
+	data, err := json.Marshal(fields)
+	return string(data), err == nil
+}
+
+// ownedItems returns, for each map-list path, the keys of the items manager's
+// server-side apply owns in obj, read from its managed fields (`k:{...}`
+// entries under the list's `f:` path). It is nil when that entry is missing or
+// unreadable, which callers treat as unknown ownership.
+func ownedItems(obj *unstructured.Unstructured, manager string, lists map[string][]string) map[string]map[string]bool {
+	var fields map[string]any
+	for _, entry := range obj.GetManagedFields() {
+		if entry.Manager != manager || entry.Operation != metav1.ManagedFieldsOperationApply || entry.Subresource != "" || entry.FieldsV1 == nil {
+			continue
+		}
+		if err := json.Unmarshal(entry.FieldsV1.GetRawBytes(), &fields); err != nil {
+			return nil
+		}
+	}
+	if fields == nil {
+		return nil
+	}
+	out := map[string]map[string]bool{}
+	for path := range lists {
+		node := fields
+		for _, segment := range strings.Split(path, ".") {
+			node, _ = node["f:"+segment].(map[string]any)
+		}
+		out[path] = map[string]bool{}
+		for entry := range node {
+			raw, ok := strings.CutPrefix(entry, "k:")
+			if !ok {
+				continue
+			}
+			var key map[string]any
+			if err := json.Unmarshal([]byte(raw), &key); err != nil {
+				return nil
+			}
+			data, err := json.Marshal(key)
+			if err != nil {
+				return nil
+			}
+			out[path][string(data)] = true
+		}
+	}
+	return out
 }
 
 // collisions quarantines Device candidates whose identity facts match another
