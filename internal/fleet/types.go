@@ -50,6 +50,20 @@ var ReadKinds = []string{KindFacility, KindRack, KindPowerFeed, KindManufacturer
 // a DeviceType its Manufacturer, and claims and feeds their Rack.
 var WriteKinds = []string{KindRack, KindPowerFeed, KindManufacturer, KindDeviceType, KindDeviceClaim, KindDevice, KindCable}
 
+// MapLists are the spec lists Fleet's CRD declares as
+// x-kubernetes-list-type: map, per written kind, by dotted path, with their
+// list-map keys. Server-side apply merges these lists item by item, so other
+// managers can own fields on items this controller applied, and items of
+// their own. Every such list sits under plain object fields, never inside
+// another list. A test checks this table against the vendored Fleet CRD.
+var MapLists = map[string]map[string][]string{
+	KindPowerFeed:   {"spec.terminations": {"id"}},
+	KindDeviceType:  {"spec.componentTemplates": {"id"}, "spec.faceplate.banks": {"id"}},
+	KindDeviceClaim: {"spec.ports": {"name"}, "spec.cableRefs": {"name"}},
+	KindDevice:      {"spec.components": {"id"}, "spec.interfaces": {"name"}},
+	KindCable:       {"spec.lanes": {"id"}},
+}
+
 // GVK returns the GroupVersionKind for a Fleet inventory kind.
 func GVK(kind string) schema.GroupVersionKind {
 	return schema.GroupVersionKind{Group: Group, Version: Version, Kind: kind}

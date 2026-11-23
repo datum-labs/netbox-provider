@@ -430,6 +430,7 @@ func applied(obj *unstructured.Unstructured) *unstructured.Unstructured {
 	obj.SetUID(types.UID("uid-" + obj.GetName()))
 	obj.SetManagedFields(append(obj.GetManagedFields(), metav1.ManagedFieldsEntry{
 		Manager: plan.FieldManager, Operation: metav1.ManagedFieldsOperationApply, APIVersion: "fleet.datumapis.com/v1alpha1",
+		FieldsV1: ownedListItems(obj),
 	}))
 	return obj
 }
