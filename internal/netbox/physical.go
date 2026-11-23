@@ -68,6 +68,8 @@ type Component struct {
 	RearPortPosition *int64            `json:"rear_port_position,omitempty"`
 	// PowerPort maps a power outlet to the inlet that feeds it.
 	PowerPort *Ref `json:"power_port,omitempty"`
+	// Module is the module that installed the component, if any.
+	Module *Ref `json:"module,omitempty"`
 }
 
 // RearPortMapping maps one front port position to a rear port position.

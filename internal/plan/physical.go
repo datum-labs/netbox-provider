@@ -82,11 +82,21 @@ func componentID(collection string, id int64) string {
 // deviceParts is the component inventory of one NetBox device.
 type deviceParts struct {
 	components []fleet.Component
-	mappings   []fleet.InternalMapping
+	// origins holds each component's NetBox record, in the same order.
+	origins  []origin
+	mappings []fleet.InternalMapping
 	// problem is why the parts cannot be recorded exactly. A Device is never
 	// created with a partial component list: records are create-only, so a
 	// dropped component could never be added later.
 	problem string
+}
+
+// origin is the NetBox record of a component: its collection/ID key, its
+// NetBox name, and whether a module installed it.
+type origin struct {
+	key    string
+	name   string
+	module bool
 }
 
 // owned is one component, indexed for cable endpoints.
@@ -145,14 +155,87 @@ func (b *builder) collectComponents() {
 				}
 			}
 			p.components = append(p.components, c)
-			b.components[key] = owned{device: record.Device.ID, component: c}
+			p.origins = append(p.origins, origin{key: key, name: record.Name, module: record.Module != nil})
 		}
 	}
+	deviceTypes := map[int64]int64{}
+	for _, d := range b.in.Snapshot.Devices {
+		if d.DeviceType != nil {
+			deviceTypes[d.ID] = d.DeviceType.ID
+		}
+	}
+	templates := b.templateIndex()
 	for device, p := range b.parts {
 		if len(p.components) > maxComponents {
 			p.problem = fmt.Sprintf("%d components exceed Fleet's limit of %d", len(p.components), maxComponents)
 		}
+		if typeID, ok := deviceTypes[device]; ok {
+			useTemplateIDs(p, templates[typeID])
+		}
+		for i, c := range p.components {
+			b.components[p.origins[i].key] = owned{device: device, component: c}
+		}
+	}
+	for device, p := range b.parts {
 		b.internalMappings(device, p)
+	}
+}
+
+// templateIndex maps each device type to its component templates by Fleet
+// component type and NetBox name, listing every matching template ID. The
+// templates and IDs are the ones the DeviceType records.
+func (b *builder) templateIndex() map[int64]map[string][]string {
+	index := map[int64]map[string][]string{}
+	for _, collection := range netbox.TemplateCollections {
+		for _, t := range b.in.Snapshot.Templates[collection] {
+			if t.DeviceType == nil || t.Name == "" {
+				continue
+			}
+			if collection == netbox.CollectionInterfaceTemplates && logicalInterfaceTypes[netbox.ChoiceValue(t.Type)] {
+				continue
+			}
+			if index[t.DeviceType.ID] == nil {
+				index[t.DeviceType.ID] = map[string][]string{}
+			}
+			match := templateTypes[collection] + "/" + t.Name
+			index[t.DeviceType.ID][match] = append(index[t.DeviceType.ID][match], componentID(collection, t.ID))
+		}
+	}
+	return index
+}
+
+// useTemplateIDs gives a component the ID of the component template it was
+// made from, so Fleet joins the Device's components to its DeviceType's
+// templates by ID. NetBox records no link from a component to its template:
+// it makes components from templates by name. A component takes a template's
+// ID only when exactly one template on its device's type has its Fleet type
+// and NetBox name, and no other component of the device takes that template.
+// Otherwise it keeps its instance ID, <collection>-<NetBox ID>. A component a
+// module installed keeps its instance ID: a device type's templates never
+// describe it.
+//
+// IDs stay unique within the Device. Template IDs are unique because each is
+// given to at most one component. Instance IDs are unique because NetBox IDs
+// are unique within a collection. A template ID never equals an instance ID,
+// because every template collection's name differs from every component
+// collection's name, so the <collection>- prefixes differ.
+func useTemplateIDs(p *deviceParts, templates map[string][]string) {
+	matched := make([]string, len(p.components))
+	claims := map[string]int{}
+	for i, c := range p.components {
+		o := p.origins[i]
+		if o.module || o.name == "" {
+			continue
+		}
+		if ids := templates[c.Type+"/"+o.name]; len(ids) == 1 {
+			matched[i] = ids[0]
+			claims[ids[0]]++
+		}
+	}
+	for i, id := range matched {
+		if id != "" && claims[id] == 1 {
+			p.components[i].ID = id
+		}
 	}
 }
 
@@ -170,7 +253,7 @@ func (b *builder) internalMappings(device int64, p *deviceParts) {
 				b.frontPortMappings(device, p, record, usedRear)
 				continue
 			}
-			from := fleet.ComponentPosition{ComponentID: componentID(collection, record.ID), Position: 1}
+			from := fleet.ComponentPosition{ComponentID: b.components[collection+"/"+strconv.FormatInt(record.ID, 10)].component.ID, Position: 1}
 			if record.PowerPort == nil {
 				continue
 			}
@@ -187,7 +270,7 @@ func (b *builder) internalMappings(device int64, p *deviceParts) {
 // frontPortMappings records a front port's paths to rear port positions,
 // from NetBox's per-position mappings or its older single mapping.
 func (b *builder) frontPortMappings(device int64, p *deviceParts, record netbox.Component, usedRear map[fleet.ComponentPosition]bool) {
-	id := componentID(netbox.CollectionFrontPorts, record.ID)
+	id := b.components[netbox.CollectionFrontPorts+"/"+strconv.FormatInt(record.ID, 10)].component.ID
 	type mapping struct{ from, rear, rearPosition *int64 }
 	var mappings []mapping
 	for _, m := range record.RearPorts {
