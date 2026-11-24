@@ -3,6 +3,7 @@
 package plan
 
 import (
+	"bytes"
 	"fmt"
 	"net"
 	"net/netip"
@@ -42,6 +43,13 @@ const (
 
 // maxComponents is Fleet's limit on a Device's components.
 const maxComponents = 256
+
+// maxInterfaces and maxInterfaceName are Fleet's limits on a Device's
+// interfaces and on an interface name.
+const (
+	maxInterfaces    = 32
+	maxInterfaceName = 63
+)
 
 // feedOutput is the one termination of every imported PowerFeed.
 const feedOutput = "output"
@@ -85,6 +93,10 @@ type deviceParts struct {
 	// origins holds each component's NetBox record, in the same order.
 	origins  []origin
 	mappings []fleet.InternalMapping
+	// interfaces are the expected MACs of its physical interfaces, and
+	// macNote says which MACs NetBox records that are left out.
+	interfaces []fleet.Interface
+	macNote    string
 	// problem is why the parts cannot be recorded exactly. A Device is never
 	// created with a partial component list: records are create-only, so a
 	// dropped component could never be added later.
@@ -92,11 +104,13 @@ type deviceParts struct {
 }
 
 // origin is the NetBox record of a component: its collection/ID key, its
-// NetBox name, and whether a module installed it.
+// NetBox name, whether a module installed it, and an interface's MAC as
+// NetBox records it.
 type origin struct {
 	key    string
 	name   string
 	module bool
+	mac    string
 }
 
 // owned is one component, indexed for cable endpoints.
@@ -155,7 +169,7 @@ func (b *builder) collectComponents() {
 				}
 			}
 			p.components = append(p.components, c)
-			p.origins = append(p.origins, origin{key: key, name: record.Name, module: record.Module != nil})
+			p.origins = append(p.origins, origin{key: key, name: record.Name, module: record.Module != nil, mac: record.MACAddress})
 		}
 	}
 	deviceTypes := map[int64]int64{}
@@ -179,6 +193,96 @@ func (b *builder) collectComponents() {
 	for device, p := range b.parts {
 		b.internalMappings(device, p)
 	}
+	b.expectedMACs()
+}
+
+// macAddress normalizes a NetBox MAC to Fleet's form, a lowercase
+// colon-separated EUI-48, or reports that it is not one. An all-zero or group
+// (multicast) address cannot name one port, so it is not used either.
+func macAddress(raw string) (string, bool) {
+	hw, err := net.ParseMAC(strings.TrimSpace(raw))
+	if err != nil || len(hw) != 6 || hw[0]&1 == 1 || bytes.Equal(hw, make(net.HardwareAddr, 6)) {
+		return "", false
+	}
+	return hw.String(), true
+}
+
+// expectedMACs gives each device the MACs NetBox records on its physical
+// interfaces, as Device.spec.interfaces[] named like their components. Only
+// NetworkPort components are interfaces: virtual, LAG and bridge interfaces
+// are never components. A MAC is expected evidence, not identity, so one that
+// cannot be recorded exactly is left empty and named in the Device's message,
+// and the Device is still written: one that is not an EUI-48 unicast address,
+// one on an interface whose name is longer than Fleet allows or shared by
+// another interface of the device, and one NetBox records on more than one
+// interface anywhere in the snapshot, which is left empty on every one of
+// them, since Fleet rejects a MAC recorded twice on a Device and the BMC's
+// MAC must match one port. A device with more MACs than Fleet's interface
+// limit gets none. A MAC is never invented or derived.
+func (b *builder) expectedMACs() {
+	seen := map[string]int{}
+	for _, p := range b.parts {
+		for i, c := range p.components {
+			if mac, ok := macAddress(p.origins[i].mac); ok && c.Type == fleet.ComponentNetworkPort {
+				seen[mac]++
+			}
+		}
+	}
+	for _, p := range b.parts {
+		names := map[string]int{}
+		for _, c := range p.components {
+			if c.Type == fleet.ComponentNetworkPort {
+				names[c.Name]++
+			}
+		}
+		var invalid, shared, unnamed []string
+		for i, c := range p.components {
+			raw := p.origins[i].mac
+			if c.Type != fleet.ComponentNetworkPort || raw == "" {
+				continue
+			}
+			mac, ok := macAddress(raw)
+			switch {
+			case !ok:
+				invalid = append(invalid, c.ID)
+			case seen[mac] > 1:
+				shared = append(shared, c.ID)
+			case len(c.Name) > maxInterfaceName || names[c.Name] > 1:
+				unnamed = append(unnamed, c.ID)
+			default:
+				p.interfaces = append(p.interfaces, fleet.Interface{Name: c.Name, MACAddress: mac})
+			}
+		}
+		if len(p.interfaces) > maxInterfaces {
+			p.macNote = fmt.Sprintf("no expected MACs: %d interfaces have one, more than Fleet's limit of %d", len(p.interfaces), maxInterfaces)
+			p.interfaces = nil
+			continue
+		}
+		var notes []string
+		for _, left := range []struct {
+			why string
+			ids []string
+		}{
+			{"not an EUI-48 unicast MAC", invalid},
+			{"MAC recorded on more than one interface", shared},
+			{"interface name too long or not unique", unnamed},
+		} {
+			if len(left.ids) > 0 {
+				notes = append(notes, left.why+": "+listed(left.ids, 3))
+			}
+		}
+		if len(notes) > 0 {
+			p.macNote = "expected MAC left empty, " + strings.Join(notes, "; ")
+		}
+	}
+}
+
+// listed joins at most n values and counts the rest.
+func listed(values []string, n int) string {
+	if len(values) <= n {
+		return strings.Join(values, ", ")
+	}
+	return fmt.Sprintf("%s and %d more", strings.Join(values[:n], ", "), len(values)-n)
 }
 
 // templateIndex maps each device type to its component templates by Fleet

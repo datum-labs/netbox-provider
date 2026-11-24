@@ -157,6 +157,7 @@ a terminal error.
 | rack | `Rack` | `facilityRef` from the rack's mapped location, else its mapped site. `heightUnits` only when integral and 1 to 100. |
 | device | `DeviceClaim` + `Device` | Only devices listed as `Physical`. The claim is `lifecycle: Installation` with `Facility`, `RackMembership` or `RackUnits` placement; only `RackUnits` writes position, height and face. The device binds to the claim, carries `topologyAuthority: Cable`, the model shape, the asset tag as `assetTag`, and its components. |
 | component | `Device.spec.components[]`, `internalMappings[]` | Interfaces, power ports and outlets, console and console server ports, front and rear ports, modules, inventory items and device bays, with the ID of the component template it was made from, or `<collection>-<NetBox ID>` when there is none (see [Component IDs](#component-ids)), and the NetBox port type as `connector`. Virtual, LAG and bridge interfaces are networking, not components. A rear port needs a position count. Each front port position maps to its rear port position (NetBox 4.5 and later list one mapping per position; older NetBox records one), and outlets map to the inlet that feeds them. If any component or path cannot be recorded exactly, or there are more than 256, the Device is `Unresolved/ComponentsInvalid`: a Device's components are written in one apply, so a partial list is never recorded. |
+| interface MAC | `Device.spec.interfaces[].macAddress` | The MAC NetBox expects on each physical interface (not virtual, LAG or bridge), as `{name, macAddress}` with the interface's component name. Read from the interface's `primary_mac_address` (NetBox 4.2 and later), else its legacy `mac_address`; no other request is made. Written in Fleet's form, a lowercase colon-separated EUI-48. A MAC is expected evidence for discovery to compare, never identity, so one that cannot be written exactly is left empty, the Device is still written, and its plan message names the interfaces: a value that is not an EUI-48 unicast address (including all zeros and multicast), an interface name over Fleet's 63 characters or shared with another interface, and a MAC NetBox records on more than one interface anywhere in the snapshot, which is left empty on every one. Fleet rejects a MAC recorded twice on a Device, and discovery could not tell which port a shared MAC names. A device with more than Fleet's 32 interfaces with a MAC writes none. No MAC is invented, derived or written when NetBox records none. A MAC another writer recorded in `unmappedMACAddresses`, or on another interface name, makes Fleet reject the apply, which is quarantined with Fleet's message. |
 | power feed | `PowerFeed` | `facilityRef` from its power panel's mapped location or site; `rackRef` when NetBox names a rack; supply type, voltage, current and phase; one `output` power outlet termination. A planned feed is excluded. The panel is not written: it has no Fleet kind, and an external reference would be a source field. |
 | cable | `Cable` | One lane between two planned endpoints: a component of a created Device or a feed output. An endpoint on a device without a created Device, outside the scope, logical, or a circuit leaves the cable `Unresolved`. Power cables must join an outlet and an inlet and console cables two console components; their medium follows. Data cables take the reviewed medium of their NetBox type. Planned cables are excluded; cables with several terminations per side and multi-position endpoints are not imported, because lanes are never inferred. |
 | out-of-band IP | `Device.spec.bmc.endpoint` | **Interim.** Fleet's design assigns out-of-band BMC addresses to Networking/IPAM; datum-cloud/fleet#132 tracks replacing this copied endpoint with a reference to an IPAM-issued address, and datum-cloud/fleet#130 tracks discovering hardware details from the BMC. Only for roles listed in `bmc.roleSlugs` and Devices with a chassis serial, never on an unidentified Device. The address comes from the `ipam/ip-addresses` record, read for its VRF: an address in a VRF the mapping does not list in `bmc.vrfIDs` is never treated as global. Written as `https://<IPv4>:443`, the literal form Fleet's Redfish executor accepts, with NetBox's prefix length dropped. IPv6, `0.0.0.0/8`, `240.0.0.0/4` (including `255.255.255.255`), loopback, link-local and multicast addresses write no BMC, and the Device is still created with the reason in its plan message. A Device whose endpoint matches another Device's, planned or existing from any writer, is `Quarantined/BMCEndpointCollision`, naming both. Endpoints are compared by host and port, with the scheme's default port filled in, IP literals canonicalized (including IPv4-mapped IPv6) and the path ignored. A hostname endpoint on another writer's Device is compared only with the same hostname, never resolved: the planner is a pure function, DNS answers vary between resolvers and over time, and a lookup would make the plan neither reproducible nor authoritative. Quarantining every Device whenever any other writer recorded a hostname would block the namespace's BMC imports on records unrelated to them. This controller itself writes only IP literals. A switch's or PDU's management address is not a BMC, so roles are listed explicitly. |
@@ -327,6 +328,18 @@ is never sent, and nothing else is: other writers, such as an operator or a
 future collector writing device status (datum-cloud/fleet#130), keep their
 fields.
 
+A Device's spec and status have different owners. `netbox-provider` owns the
+spec fields it maps: what NetBox expects, such as identity, components, the
+BMC endpoint and expected MACs. Fleet discovery owns `Device.status`: what the
+BMC reports, compared against that spec. Applies go to the main resource and
+never carry `status`, so with Fleet's status subresource the API server keeps
+status, and its managed fields, exactly as its writer left them. Drift
+compares only `spec` and labels, so a status written by anyone is never a
+reason to apply. System UUIDs and TLS pins are discovery's to report in
+status; this controller never writes them to spec. envtest shows a status
+another manager applied is unchanged byte for byte by a create that lands on
+its Device, by a spec update, and by a no-op reconcile.
+
 | Existing record | Outcome |
 | --- | --- |
 | None | `Create`: the first apply creates it. Server-side apply has no create-only precondition, so if another writer creates the name between observation and apply, the apply merges into that record. The controller detects this from the other manager in the response, immediately applies an empty configuration preconditioned on that record's UID, which removes every field only it owned (its labels, annotations and any spec field the other writer did not set), and quarantines it as `NameConflict`. Fields the other writer set identically stay theirs. If that release fails, the record still carries this controller's labels and ownership, so the controller records it in `status.pendingReleases` with its UID before any further write, and every later Create-mode reconcile retries the release and holds the record as `Quarantined/NameConflict`, never `Unchanged` or `Update`, until it succeeds. Meanwhile `Applied` and `Ready` are `Unknown` with reason `ReleasePending`; see the [runbook](../operations/runbook.md#a-release-is-pending). A conflicting field fails the apply before anything is written. |
@@ -377,9 +390,9 @@ fails the suite until it is listed.
 **Migration.** Because owned fields follow NetBox, a record this controller
 applied gains what later versions map:
 
-- Devices applied before components, internal mappings or BMC endpoints were
-  imported get them through an `Update`, and the cables to their new
-  components are then created.
+- Devices applied before components, internal mappings, BMC endpoints or
+  expected MACs were imported get them through an `Update`, and the cables to
+  their new components are then created.
 - Devices applied while every component had its instance ID move to template
   IDs, with their Cables, as described in
   [Component IDs](#component-ids).
@@ -418,6 +431,9 @@ fixed budget.
 | Immutable fields stay immutable | A Device's identity or claim, or a claim's placement or lifecycle, that changes in NetBox is `Quarantined/ImmutableChanged` before any call | `quarantines a change to an immutable field`, `TestImmutableChangesAreQuarantined` |
 | Catalog records are never duplicated or rebound | A Manufacturer or DeviceType that another writer's record already describes is `Quarantined/CatalogDuplicate`; colliding model keys and canonical names are quarantined; a Device keeps its `deviceTypeRef` and is quarantined if NetBox moves it to another type | `TestOperatorWrittenCatalogRecordsAreNeverAdopted`, `TestDuplicatesAppearingAfterOursQuarantineOurs`, `TestManufacturersDifferingOnlyInCaseAreQuarantined`, `TestModelKeyCollisionsAreQuarantined`, `TestImmutableCatalogChangesAreQuarantined`, `TestDeviceTypeRefsAreAddedLaterAndNeverRemoved`, `adds deviceTypeRef to Devices it applied` |
 | A create that lands on another writer's record is undone | The controller releases its fields at once; a failed release is recorded in `status.pendingReleases`, retried on every Create-mode reconcile, and its record stays `Quarantined/NameConflict` with `Ready=Unknown` until the release succeeds | `releases every field it applied to a record another writer created, and adopts nothing`, `retries a failed release on later reconciles and holds the record until it succeeds` |
+| Status is never written and never drift | Applies never carry `status` and go only to the main resource; drift compares only spec and labels | `is kept byte for byte, and is not drift, on a no-op reconcile`, `is kept byte for byte when the Device's spec is updated`, `is kept byte for byte when a create lands on a Device another writer made`, `TestStatusAnotherWriterOwnsIsNeverDrift` |
+| Expected MACs are never ambiguous or invented | Only NetBox's MAC on a physical interface, normalized; an invalid, oversized or repeated MAC is left empty and noted | `TestExpectedMACs`, `TestMoreMACsThanFleetAllowsWritesNone`, `TestExpectedMACsFollowNetBox`, `TestInterfaceMACPrefersThePrimaryMACAddress`, `are written in Fleet's form, and a MAC NetBox records twice is removed from both interfaces` |
+| Credential custom fields never cross | Custom fields are not decoded; nothing logs raw records | `never reach the snapshot, its digest input, the plan, Fleet, status or logs`, `TestSnapshotAllowlistsFieldsAndIsStable` |
 | No two Devices share a BMC endpoint | A planned endpoint equal to another planned or existing Device's, from any writer, quarantines it | `TestDevicesNeverShareABMCEndpoint` |
 | Records not written by this controller are never adopted | Same name without matching correlation labels is `Quarantined/NameConflict`, even with an identical spec; Flux labels are named in the message | `never adopts an identical record that lacks this controller's labels`, `rejects an existing name from another writer`, `TestSameNameWithoutOurLabelsIsNeverAdopted` |
 | Equal records are no-ops; owned fields follow NetBox | Correlated by labels and this controller's apply ownership; unchanged digest and values send nothing, differences are `Update`. Records it did not apply are `Quarantined/NotApplyOwned` | `then is a no-op`, `TestOwnedFieldChangeIsUpdated`, `TestRecordNotAppliedByThisControllerIsNeverAdopted` |
@@ -452,6 +468,14 @@ Salvaged from the earlier scaffold and generalized to scoped collections:
 - Only allowlisted fields are decoded; custom fields, config contexts,
   comments, URLs and every other field are dropped at decode time. Errors carry
   no response bodies or tokens.
+- Custom fields are never requested, decoded, kept, logged or put in the
+  snapshot digest. NetBox returns them on every device whether asked or not,
+  and they can hold credentials, such as a BMC password in an `oob_password`
+  field. The typed decode has no field for them, so they are discarded with
+  the raw record, and nothing logs a raw record or response body. A test
+  serves a synthetic `oob_password` and checks that it reaches none of the
+  decoded snapshot, the digest input, the plan, the Fleet records, the
+  NetBoxSource status or the controller's logs.
 - No automatic retry inside a read; the controller's backoff retries the whole
   read.
 

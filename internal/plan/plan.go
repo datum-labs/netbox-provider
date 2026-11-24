@@ -516,6 +516,7 @@ func (b *builder) device(source string, device netbox.Device, m netboxv1alpha1.D
 		}
 		spec.Components = parts.components
 		spec.InternalMappings = parts.mappings
+		spec.Interfaces = parts.interfaces
 	}
 	note := ""
 	if device.Role != nil && b.bmcRoles[device.Role.Slug] {
@@ -528,6 +529,9 @@ func (b *builder) device(source string, device netbox.Device, m netboxv1alpha1.D
 		default:
 			spec.BMC = &fleet.BMC{Endpoint: endpoint}
 		}
+	}
+	if parts := b.parts[device.ID]; parts != nil && parts.macNote != "" {
+		note = strings.TrimPrefix(note+"; "+parts.macNote, "; ")
 	}
 	c := b.add(fleet.KindDevice, source, spec, ref, claimCandidate.Key())
 	if note != "" && c.Action == ActionCreate {

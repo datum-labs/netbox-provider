@@ -70,6 +70,32 @@ type Component struct {
 	PowerPort *Ref `json:"power_port,omitempty"`
 	// Module is the module that installed the component, if any.
 	Module *Ref `json:"module,omitempty"`
+	// MACAddress is an interface's MAC as NetBox records it, unnormalized:
+	// the primary MAC address object's value (NetBox 4.2 and later), else
+	// the legacy mac_address field. It is empty when NetBox records none.
+	MACAddress string `json:"macAddress,omitempty"`
+}
+
+// UnmarshalJSON reads an interface's MAC from primary_mac_address, falling
+// back to mac_address. No other field of the MAC address object is kept.
+func (c *Component) UnmarshalJSON(data []byte) error {
+	type plain Component
+	var decoded struct {
+		plain
+		PrimaryMAC *struct {
+			MACAddress *string `json:"mac_address"`
+		} `json:"primary_mac_address"`
+		LegacyMAC *string `json:"mac_address"`
+	}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*c = Component(decoded.plain)
+	c.MACAddress = deref(decoded.LegacyMAC)
+	if decoded.PrimaryMAC != nil && deref(decoded.PrimaryMAC.MACAddress) != "" {
+		c.MACAddress = *decoded.PrimaryMAC.MACAddress
+	}
+	return nil
 }
 
 // RearPortMapping maps one front port position to a rear port position.

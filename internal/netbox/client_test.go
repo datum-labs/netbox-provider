@@ -297,7 +297,7 @@ func TestSnapshotAllowlistsFieldsAndIsStable(t *testing.T) {
 		t.Fatalf("observedAt %v", first.ObservedAt)
 	}
 	encoded, _ := json.Marshal(first)
-	for _, forbidden := range []string{"must-not-be-retained", "synthetic comment", "https://", "1000BASE-T", "\"Front\"", "mac_address", "comments"} {
+	for _, forbidden := range []string{"must-not-be-retained", "synthetic-oob-secret-7f3a", "oob_password", "custom_fields", "synthetic comment", "https://", "1000BASE-T", "\"Front\"", "mac_address", "comments"} {
 		if strings.Contains(string(encoded), forbidden) {
 			t.Errorf("snapshot retained non-allowlisted content %q", forbidden)
 		}
@@ -393,5 +393,35 @@ func TestCollectionTimeoutBoundsEachCollection(t *testing.T) {
 	}
 	if netbox.PagesFor(20000) != netbox.DefaultLimits.Pages || netbox.PagesFor(1000000) != 5001 {
 		t.Fatalf("pages %d %d", netbox.PagesFor(20000), netbox.PagesFor(1000000))
+	}
+}
+
+func TestInterfaceMACPrefersThePrimaryMACAddress(t *testing.T) {
+	for _, tt := range []struct {
+		name, record, want string
+	}{
+		{"primary only", `{"id": 1, "primary_mac_address": {"id": 7, "url": "https://netbox.example.invalid/api/dcim/mac-addresses/7/", "mac_address": "02:00:00:00:00:07", "description": "dropped"}}`, "02:00:00:00:00:07"},
+		{"primary over legacy", `{"id": 1, "primary_mac_address": {"id": 7, "mac_address": "02:00:00:00:00:07"}, "mac_address": "02:00:00:00:00:08"}`, "02:00:00:00:00:07"},
+		{"legacy only", `{"id": 1, "mac_address": "02-00-00-00-00-08"}`, "02-00-00-00-00-08"},
+		{"null primary", `{"id": 1, "primary_mac_address": null, "mac_address": "02:00:00:00:00:08"}`, "02:00:00:00:00:08"},
+		{"primary without a value", `{"id": 1, "primary_mac_address": {"id": 7, "mac_address": null}, "mac_address": "02:00:00:00:00:08"}`, "02:00:00:00:00:08"},
+		{"none", `{"id": 1, "mac_address": null}`, ""},
+		{"camel-case field is not NetBox's", `{"id": 1, "macAddress": "02:00:00:00:00:09"}`, ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var c netbox.Component
+			if err := json.Unmarshal([]byte(tt.record), &c); err != nil {
+				t.Fatal(err)
+			}
+			if c.MACAddress != tt.want || c.ID != 1 {
+				t.Errorf("decoded %+v, want MAC %q", c, tt.want)
+			}
+			encoded, _ := json.Marshal(c)
+			for _, forbidden := range []string{"https://", "dropped", "primary_mac_address"} {
+				if strings.Contains(string(encoded), forbidden) {
+					t.Errorf("retained %q: %s", forbidden, encoded)
+				}
+			}
+		})
 	}
 }

@@ -153,6 +153,15 @@ type DeviceSpec struct {
 	DeviceTypeRef     *LocalReference    `json:"deviceTypeRef,omitempty"`
 	Components        []Component        `json:"components,omitempty"`
 	InternalMappings  []InternalMapping  `json:"internalMappings,omitempty"`
+	Interfaces        []Interface        `json:"interfaces,omitempty"`
+}
+
+// Interface is the written subset of Device.spec.interfaces[]: a network
+// port's name and expected MAC. Peer is never written; a Device with Cable
+// topology cannot carry one.
+type Interface struct {
+	Name       string `json:"name"`
+	MACAddress string `json:"macAddress,omitempty"`
 }
 
 // ManufacturerSpec is the written subset of Manufacturer.spec.
