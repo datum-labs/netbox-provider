@@ -68,3 +68,56 @@ release the named record by hand: remove the controller's labels and
 annotations prefixed `netbox.miloapis.com/` and any field only the controller
 set, using a server-side apply with field manager `netbox-provider` and an
 empty configuration preconditioned on the logged UID.
+
+## Cable references are undelivered or Devices stay interim
+
+**Signs.** `CableReferencesDelivered` is `False`, with one of two reasons.
+
+- `UndeliveredReferences`: `status.undeliveredCableReferences` is above zero,
+  and the message names the first Cables, Devices and component IDs.
+- `InterimDevices`: `status.interimDeviceCount` is above zero, and
+  `status.interimDevices` lists the Devices with the Cables they wait for.
+
+**What happened.** Component IDs moved, for example after a template rename
+in NetBox (see the
+[design](../architecture/design.md#component-ids)). A Device whose Cables must
+move with it is applied with an interim that keeps the old IDs, then its
+Cables, then the planned Device.
+
+- An interim Device's Cable rewrite did not land: its outcome is unknown, or
+  Fleet rejected it and it is quarantined. Until it lands, the Device lists
+  each moved, cabled component twice, under the old and the new ID.
+- An undelivered reference is a Cable that this plan does not write. It still
+  names an ID the Device dropped: the Cable is retained after it left NetBox,
+  its medium is no longer reviewed, or another writer owns it.
+
+**What the controller does.** It retries an interim Device's Cable on every
+reconcile, and drops the old IDs in the same reconcile that writes the Cable.
+It never rewrites a Cable it does not plan, so an undelivered reference stays
+until the Cable is fixed.
+
+**What to do.**
+
+1. For an interim Device, read the `status.records` row of each Cable in
+   `waitingFor`. Fix what blocks it, such as an apply conflict or a missing
+   `patch` permission. Outcomes that are only unknown clear on a later
+   reconcile.
+2. For an undelivered reference, decide what the Cable should be. Restore it
+   in NetBox, or review its medium, so the controller writes it again. If
+   another writer owns it, update it there to the component ID the Device
+   now has.
+3. Do not edit the Device's components by hand. The next Create-mode apply
+   restores what NetBox records.
+
+**Suggested alerts.** This repository ships no alert rules. These expressions
+use the controller's gauges. Make each window longer than the source's
+`spec.interval` (default 30 minutes), so a Device that the next reconcile
+completes does not fire:
+
+```promql
+# A Device stayed interim across more than one reconcile interval.
+min_over_time(netbox_provider_interim_devices[45m]) > 0
+
+# A Cable names a component its Device no longer has.
+min_over_time(netbox_provider_undelivered_cable_references[45m]) > 0
+```

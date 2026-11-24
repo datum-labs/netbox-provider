@@ -44,7 +44,10 @@ const (
 	ConditionSourceObserved        = "SourceObserved"
 	ConditionFleetObserved         = "FleetObserved"
 	ConditionApplied               = "Applied"
-	ConditionReady                 = "Ready"
+	// ConditionCableReferencesDelivered is True when no Cable names a
+	// component its Device dropped and no Device is left interim.
+	ConditionCableReferencesDelivered = "CableReferencesDelivered"
+	ConditionReady                    = "Ready"
 )
 
 // Condition reasons.
@@ -66,6 +69,13 @@ const (
 	ReasonReviewRequired       = "ReviewRequired"
 	ReasonSuspended            = "Suspended"
 	ReasonReleasePending       = "ReleasePending"
+	ReasonDelivered            = "Delivered"
+	// ReasonUndeliveredReferences: a Cable this plan does not write names a
+	// component its Device no longer has.
+	ReasonUndeliveredReferences = "UndeliveredReferences"
+	// ReasonInterimDevices: a Device still holds old components because a
+	// Cable rewrite it waits for has not landed.
+	ReasonInterimDevices = "InterimDevices"
 )
 
 const (
@@ -87,6 +97,12 @@ const (
 	// maxPendingReleases bounds status.pendingReleases. While it is full,
 	// nothing is created.
 	maxPendingReleases = 100
+	// maxInterimDevices bounds status.interimDevices, and maxWaitingFor each
+	// entry's waitingFor.
+	maxInterimDevices = 100
+	maxWaitingFor     = 16
+	// namedInMessage is how many Cable references a condition message names.
+	namedInMessage = 3
 )
 
 // NetBoxSourceReconciler reconciles NetBoxSource objects.
@@ -134,6 +150,9 @@ func (r *NetBoxSourceReconciler) Reconcile(ctx context.Context, req reconcile.Re
 
 	var source netboxv1alpha1.NetBoxSource
 	if err := r.Client.Get(ctx, req.NamespacedName, &source); err != nil {
+		if apierrors.IsNotFound(err) {
+			forgetSourceMetrics(req.NamespacedName)
+		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	status := &source.Status
@@ -159,6 +178,7 @@ func (r *NetBoxSourceReconciler) Reconcile(ctx context.Context, req reconcile.Re
 		set(ConditionSourceObserved, metav1.ConditionUnknown, ReasonNotAttempted, "configuration is unresolved")
 		set(ConditionFleetObserved, metav1.ConditionUnknown, ReasonNotAttempted, "configuration is unresolved")
 		set(ConditionApplied, metav1.ConditionUnknown, ReasonNotAttempted, "configuration is unresolved")
+		set(ConditionCableReferencesDelivered, metav1.ConditionUnknown, ReasonNotAttempted, "configuration is unresolved")
 		set(ConditionReady, metav1.ConditionFalse, reason, message)
 		return ctrl.Result{RequeueAfter: pollInterval}, r.updateStatus(ctx, &source)
 	}
@@ -188,6 +208,7 @@ func (r *NetBoxSourceReconciler) Reconcile(ctx context.Context, req reconcile.Re
 		set(ConditionConfigurationResolved, metav1.ConditionFalse, ReasonTokenRejected, message)
 		set(ConditionSourceObserved, metav1.ConditionUnknown, ReasonReadFailed, "no complete NetBox observation")
 		set(ConditionApplied, metav1.ConditionUnknown, ReasonNotAttempted, "no complete NetBox observation")
+		set(ConditionCableReferencesDelivered, metav1.ConditionUnknown, ReasonNotAttempted, "no complete NetBox observation")
 		set(ConditionReady, metav1.ConditionFalse, ReasonTokenRejected, message)
 		return ctrl.Result{RequeueAfter: retry}, r.updateStatus(ctx, &source)
 	}
@@ -195,6 +216,7 @@ func (r *NetBoxSourceReconciler) Reconcile(ctx context.Context, req reconcile.Re
 		message := "NetBox read failed; source state is unknown: " + err.Error()
 		set(ConditionSourceObserved, metav1.ConditionUnknown, ReasonReadFailed, message)
 		set(ConditionApplied, metav1.ConditionUnknown, ReasonNotAttempted, "no complete NetBox observation")
+		set(ConditionCableReferencesDelivered, metav1.ConditionUnknown, ReasonNotAttempted, "no complete NetBox observation")
 		set(ConditionReady, metav1.ConditionUnknown, ReasonReadFailed, message)
 		if updateErr := r.updateStatus(ctx, &source); updateErr != nil {
 			return ctrl.Result{}, updateErr
@@ -210,6 +232,7 @@ func (r *NetBoxSourceReconciler) Reconcile(ctx context.Context, req reconcile.Re
 		message := "Fleet read failed; existing state is unknown: " + err.Error()
 		set(ConditionFleetObserved, metav1.ConditionUnknown, ReasonReadFailed, message)
 		set(ConditionApplied, metav1.ConditionUnknown, ReasonNotAttempted, "no complete Fleet observation")
+		set(ConditionCableReferencesDelivered, metav1.ConditionUnknown, ReasonNotAttempted, "no complete Fleet observation")
 		set(ConditionReady, metav1.ConditionUnknown, ReasonReadFailed, message)
 		if updateErr := r.updateStatus(ctx, &source); updateErr != nil {
 			return ctrl.Result{}, updateErr
@@ -238,6 +261,7 @@ func (r *NetBoxSourceReconciler) Reconcile(ctx context.Context, req reconcile.Re
 	}
 
 	created, updated, uncertain := 0, 0, 0
+	var interim map[string][]string
 	requeue := interval(source)
 	creates, updates := p.Count(plan.ActionCreate), p.Count(plan.ActionUpdate)
 	switch {
@@ -254,7 +278,7 @@ func (r *NetBoxSourceReconciler) Reconcile(ctx context.Context, req reconcile.Re
 		if err := r.updateStatus(ctx, &source); err != nil {
 			return ctrl.Result{}, err
 		}
-		created, updated, uncertain = r.apply(ctx, &source, p)
+		created, updated, uncertain, interim = r.apply(ctx, &source, p)
 		if uncertain > 0 {
 			set(ConditionApplied, metav1.ConditionUnknown, ReasonApplyUncertain,
 				fmt.Sprintf("%d writes have an unknown outcome; they are re-observed before any retry", uncertain))
@@ -273,6 +297,7 @@ func (r *NetBoxSourceReconciler) Reconcile(ctx context.Context, req reconcile.Re
 	}
 
 	r.summarize(&source, p)
+	r.reportCableReferences(&source, p, existing, interim, uncertain, set)
 	logPlan(logger, p)
 	blocked := status.Plan.Quarantined + status.Plan.Unresolved
 	switch {
@@ -428,7 +453,7 @@ func (r *NetBoxSourceReconciler) observeFleet(ctx context.Context, namespace str
 // keeps the old components its existing Cables name, is applied in dependency
 // order. The planned Device follows once every Cable it waits for is written.
 // If one is not, the interim stays until a later reconcile writes it.
-func (r *NetBoxSourceReconciler) apply(ctx context.Context, source *netboxv1alpha1.NetBoxSource, p *plan.Plan) (int, int, int) {
+func (r *NetBoxSourceReconciler) apply(ctx context.Context, source *netboxv1alpha1.NetBoxSource, p *plan.Plan) (int, int, int, map[string][]string) {
 	logger := log.FromContext(ctx)
 	created, updated, uncertain := 0, 0, 0
 	// blocked maps a target key to true when its write outcome is unknown
@@ -494,7 +519,14 @@ func (r *NetBoxSourceReconciler) apply(ctx context.Context, source *netboxv1alph
 					})
 					if err := r.updateStatus(ctx, source); err != nil {
 						logger.Error(err, "recording a pending release failed; no further records are written", "kind", kind, "name", c.Name, "uid", obj.GetUID())
-						return created, updated, uncertain
+						// Staged Devices whose interim landed stay interim.
+						interim := map[string][]string{}
+						for _, s := range staged {
+							if s.Action == actionUpdated {
+								interim[s.Key()] = waitingFor(s, nil)
+							}
+						}
+						return created, updated, uncertain, interim
 					}
 				} else {
 					blocked[c.Key()] = false
@@ -533,31 +565,28 @@ func (r *NetBoxSourceReconciler) apply(ctx context.Context, source *netboxv1alph
 			}
 		}
 	}
-	return created, updated, uncertain + r.completeStaged(ctx, p, staged)
+	stagedUncertain, interim := r.completeStaged(ctx, p, staged)
+	return created, updated, uncertain + stagedUncertain, interim
 }
 
 // completeStaged applies the planned Device of each interim that was written,
-// once every Cable it waits for is written, and returns how many of those
-// writes have an unknown outcome.
-func (r *NetBoxSourceReconciler) completeStaged(ctx context.Context, p *plan.Plan, staged []*plan.Candidate) int {
+// once every Cable it waits for is written. It returns how many of those
+// writes have an unknown outcome, and, by Device key, the Devices left
+// interim with the Cables each still waits for.
+func (r *NetBoxSourceReconciler) completeStaged(ctx context.Context, p *plan.Plan, staged []*plan.Candidate) (int, map[string][]string) {
 	byKey := map[string]*plan.Candidate{}
 	for _, c := range p.Candidates {
 		byKey[c.Key()] = c
 	}
 	uncertain := 0
+	interim := map[string][]string{}
 	for _, c := range staged {
 		if c.Action != actionUpdated {
 			continue
 		}
-		waiting := ""
-		for _, key := range c.Holders {
-			if h := byKey[key]; h == nil || h.Action != actionUpdated {
-				waiting = key
-				break
-			}
-		}
-		if waiting != "" {
-			c.Message = "keeps the old components that " + waiting + " still names until that Cable is written"
+		if waiting := waitingFor(c, byKey); len(waiting) > 0 {
+			c.Message = "keeps the old components that " + fleet.KindCable + "/" + waiting[0] + " still names until that Cable is written"
+			interim[c.Key()] = waiting
 			continue
 		}
 		obj := c.Object.DeepCopy()
@@ -565,6 +594,7 @@ func (r *NetBoxSourceReconciler) completeStaged(ctx context.Context, p *plan.Pla
 		err := r.Fleet.Apply(ctx, client.ApplyConfigurationFromUnstructured(obj), client.FieldOwner(plan.FieldManager))
 		switch {
 		case err == nil:
+			continue
 		case isFieldManagerConflict(err):
 			c.Action, c.Reason, c.Message = plan.ActionQuarantined, plan.ReasonApplyConflict, truncate(conflictMessage(err), 256)
 		case !isUIDMismatch(err) && (apierrors.IsInvalid(err) || apierrors.IsForbidden(err) || apierrors.IsBadRequest(err)):
@@ -573,8 +603,22 @@ func (r *NetBoxSourceReconciler) completeStaged(ctx context.Context, p *plan.Pla
 			c.Message = "the interim components were written and removing them has an unknown outcome: " + truncate(apiMessage(err), 160)
 			uncertain++
 		}
+		// The interim landed and the planned Device did not.
+		interim[c.Key()] = nil
 	}
-	return uncertain
+	return uncertain, interim
+}
+
+// waitingFor returns the names of the Cables a staged Device waits for whose
+// rewrite did not land, or every Cable it waits for when byKey is nil.
+func waitingFor(c *plan.Candidate, byKey map[string]*plan.Candidate) []string {
+	var out []string
+	for _, key := range c.Holders {
+		if h := byKey[key]; byKey == nil || h == nil || h.Action != actionUpdated {
+			out = append(out, strings.TrimPrefix(key, fleet.KindCable+"/"))
+		}
+	}
+	return out
 }
 
 // retryReleases retries each release in status.pendingReleases when write is
