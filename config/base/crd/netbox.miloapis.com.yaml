@@ -490,7 +490,8 @@ spec:
               conditions:
                 description: |-
                   Conditions: ConfigurationResolved, SourceObserved, FleetObserved,
-                  Applied and Ready. Uncertainty is Unknown, never True.
+                  Applied, CableReferencesDelivered and Ready. Uncertainty is Unknown,
+                  never True.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -549,6 +550,57 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              interimDeviceCount:
+                description: |-
+                  InterimDeviceCount counts the Devices left in their interim state by
+                  the last reconcile, including any InterimDevices omits.
+                format: int32
+                type: integer
+              interimDevices:
+                description: |-
+                  InterimDevices lists Devices that still hold both the old and the new
+                  IDs of components that moved, because a Cable rewrite they wait for
+                  has not landed. It is bounded.
+                items:
+                  description: |-
+                    InterimDevice is a Device whose interim apply kept the old components its
+                    Cables name, and whose planned apply, which drops them, has not landed.
+                  properties:
+                    message:
+                      description: Message says why the Device is still interim.
+                      type: string
+                    name:
+                      description: Name is the Fleet Device name.
+                      type: string
+                    since:
+                      description: Since is when a reconcile first left the Device
+                        interim.
+                      format: date-time
+                      type: string
+                    source:
+                      description: Source is the source record key, such as dcim/devices/12.
+                      type: string
+                    waitingFor:
+                      description: |-
+                        WaitingFor names the Cables whose rewrite has not landed. It is empty
+                        when the planned apply itself failed.
+                      items:
+                        type: string
+                      maxItems: 16
+                      type: array
+                      x-kubernetes-list-type: atomic
+                  required:
+                  - name
+                  - since
+                  - source
+                  type: object
+                maxItems: 100
+                type: array
+                x-kubernetes-list-type: atomic
+              interimDevicesTruncated:
+                description: InterimDevicesTruncated is true when InterimDevices omits
+                  entries.
+                type: boolean
               lastObservation:
                 description: LastObservation describes the last complete NetBox read.
                 properties:
@@ -709,6 +761,15 @@ spec:
               recordsTruncated:
                 description: RecordsTruncated is true when Records omits entries.
                 type: boolean
+              undeliveredCableReferences:
+                description: |-
+                  UndeliveredCableReferences counts the Cable endpoints in Fleet that name
+                  a component their Device does not have once this reconcile's writes
+                  land, among the Devices this source plans. Such a Cable is one this
+                  plan does not write, so it still names a component the Device dropped.
+                  The CableReferencesDelivered condition names the first few.
+                format: int32
+                type: integer
             type: object
         type: object
     served: true

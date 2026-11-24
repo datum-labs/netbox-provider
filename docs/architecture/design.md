@@ -77,9 +77,11 @@ One NetBox instance connected to one Fleet namespace.
 | `suspend` | Stops reads and writes. |
 
 Status holds `ConfigurationResolved`, `SourceObserved`, `FleetObserved`,
-`Applied` and `Ready` conditions; the last observation's snapshot digest,
-observation time, mapping revision and collection counts; plan counts; and up
-to 100 notable records, conflicts first. Status never contains serials, asset
+`Applied`, `CableReferencesDelivered` and `Ready` conditions; the last
+observation's snapshot digest, observation time, mapping revision and
+collection counts; plan counts; up to 100 notable records, conflicts first;
+and the [Cable references](#cable-references) the last reconcile left
+undelivered, with up to 100 Devices left interim. Status never contains serials, asset
 tags, tokens, or response bodies.
 
 ### NetBoxMapping
@@ -142,6 +144,8 @@ three the device is `Unresolved`, never placed by inference.
 7. **Summarize.** `Ready=True` only when configuration, NetBox and Fleet were
    all observed completely and nothing is quarantined or unresolved. `Ready`
    describes this import, never the readiness of a Fleet record or of hardware.
+   `CableReferencesDelivered` reports the Cables and Devices described in
+   [Cable references](#cable-references). It does not change `Ready`.
 
 Following the template's reconcile-error rules, transient NetBox and Fleet
 failures return an error (retried with backoff from 30 seconds up to 30
@@ -261,7 +265,8 @@ Cable this plan does not write, such as one retained after it left NetBox,
 cannot move, so the Device's message names it and it is left naming the old
 ID. A Device whose interim would exceed Fleet's 256 components is applied in
 one step; its Cables then name missing components until they are applied
-later in the same reconcile.
+later in the same reconcile. Both cases appear in status and metrics; see
+[Cable references](#cable-references).
 
 After the move, the next reconcile writes nothing: the planned Device and
 Cables match what was applied.
@@ -297,6 +302,46 @@ entry's key. Fields another writer set on the old entry, such as an
 operator's `assetTag`, are not carried to the new ID. Server-side apply keeps
 the old entry with only that writer's fields, and the controller leaves it
 alone, as it does any entry only another manager owns.
+
+### Cable references
+
+Two outcomes of the staged move leave work for a later reconcile or for an
+operator. The controller reports both in status and as Prometheus gauges
+labelled with the source's `resource_namespace` and `resource_name`.
+
+- **Undelivered Cable references.** A Fleet Cable this plan does not write,
+  from any writer, names a component that one of this source's planned
+  Devices does not have once the reconcile's writes land. Examples are a
+  Cable retained after it left NetBox, or one whose medium is no longer
+  reviewed. The reference stays undelivered on every later reconcile until
+  the Cable is written or changed, even though the Device no longer changes.
+  `status.undeliveredCableReferences` counts the endpoints, and so does the
+  gauge `netbox_provider_undelivered_cable_references`.
+- **Interim Devices.** A Device whose interim was applied, and whose planned
+  apply was not, because a Cable it waits for was not written or the planned
+  apply itself failed. It holds both the old and new IDs of its moved
+  components. `status.interimDevices` lists up to 100 of them, sorted by
+  name. Each entry has the Device's name and source record, the Cables it
+  waits for (up to 16), its message, and `since`, the time a reconcile first
+  left it interim. `since` carries over while it stays interim.
+  `status.interimDeviceCount` counts all of them, `interimDevicesTruncated`
+  marks an omission, and the gauge is `netbox_provider_interim_devices`.
+
+`CableReferencesDelivered` summarizes both:
+
+| Status | Reason | When |
+| --- | --- | --- |
+| `False` | `UndeliveredReferences` | Any undelivered Cable reference. The message gives the count and the first three as `Cable/<name> -> Device/<name> component <id>`, and also names the interim Devices, if any. |
+| `False` | `InterimDevices` | Any interim Device and no undelivered reference. The message gives the count and the first three Device names. |
+| `Unknown` | `ApplyUncertain` | Neither, but some writes have an unknown outcome. |
+| `Unknown` | `NotAttempted` | No complete NetBox or Fleet observation, or unresolved configuration. Status and gauges keep their last values. |
+| `True` | `Delivered` | Neither. |
+
+In `Observe` mode nothing is written. The condition then assumes every planned
+write lands, so it previews the undelivered references a switch to `Create`
+would leave, and no Device is interim. Deleting a NetBoxSource removes its
+gauge series. The [runbook](../operations/runbook.md#cable-references-are-undelivered-or-devices-stay-interim)
+covers what to do and suggests alerts.
 
 ## Hardware catalog
 
@@ -470,6 +515,7 @@ fixed budget.
 | Records not written by this controller are never adopted | Same name without matching correlation labels is `Quarantined/NameConflict`, even with an identical spec; Flux labels are named in the message | `never adopts an identical record that lacks this controller's labels`, `rejects an existing name from another writer`, `TestSameNameWithoutOurLabelsIsNeverAdopted` |
 | Equal records are no-ops; owned fields follow NetBox | Correlated by labels and this controller's apply ownership; unchanged digest and values send nothing, differences are `Update`. Records it did not apply are `Quarantined/NotApplyOwned` | `then is a no-op`, `TestOwnedFieldChangeIsUpdated`, `TestRecordNotAppliedByThisControllerIsNeverAdopted` |
 | A template edit moves component IDs once, with no dangling Cable | One Device Update per affected Device, staged through its interim; its Cables and DeviceType are updated in the same plan; the next plan writes nothing | `TestTemplateChangesMoveComponentIDsInOneDeviceUpdate`, `moves one component between its template and instance IDs with one Device update each way` |
+| Undelivered Cable references and interim Devices are visible | `CableReferencesDelivered`, `status.undeliveredCableReferences`, `status.interimDevices` and two gauges, recomputed from Fleet on every reconcile | `TestUndeliveredReferences`, `is True with zero gauges when every Cable names components its Device has`, `lists a Device left interim by a blocked Cable write, and recovers once the Cable lands`, `reports a Cable this plan does not write that names a component its Device dropped, on every reconcile`, `drops a deleted source's series` |
 | Identity collisions are quarantined | Serial, system UUID, asset tag, provider host ID, or provider host ID versus serial matching another Device | `quarantines an identity collision`, `TestIdentityCollisionsAreQuarantined` |
 | No duplicate of a source already labelled under another name | `Quarantined/SourceAlreadyRecorded` | `TestSourceLabelledUnderAnotherNameIsNotDuplicated` |
 | No invented identity | A Device without a reviewed chassis serial carries the unidentified marker, never a serial; a provider-hosted server is `Unresolved/IdentityUnavailable` with its claim still created | `records a device without a chassis serial as unidentified`, `TestDeviceWithoutSerialIsRecordedAsUnidentified`, `admits the unidentified marker only without serial, system UUID or BMC` |

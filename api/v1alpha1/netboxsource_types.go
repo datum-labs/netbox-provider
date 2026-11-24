@@ -277,7 +277,8 @@ type NetBoxSourceStatus struct {
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
 	// Conditions: ConfigurationResolved, SourceObserved, FleetObserved,
-	// Applied and Ready. Uncertainty is Unknown, never True.
+	// Applied, CableReferencesDelivered and Ready. Uncertainty is Unknown,
+	// never True.
 	//
 	// +listType=map
 	// +listMapKey=type
@@ -302,6 +303,32 @@ type NetBoxSourceStatus struct {
 	// +optional
 	RecordsTruncated bool `json:"recordsTruncated,omitempty"`
 
+	// UndeliveredCableReferences counts the Cable endpoints in Fleet that name
+	// a component their Device does not have once this reconcile's writes
+	// land, among the Devices this source plans. Such a Cable is one this
+	// plan does not write, so it still names a component the Device dropped.
+	// The CableReferencesDelivered condition names the first few.
+	// +optional
+	UndeliveredCableReferences int32 `json:"undeliveredCableReferences,omitempty"`
+
+	// InterimDeviceCount counts the Devices left in their interim state by
+	// the last reconcile, including any InterimDevices omits.
+	// +optional
+	InterimDeviceCount int32 `json:"interimDeviceCount,omitempty"`
+
+	// InterimDevices lists Devices that still hold both the old and the new
+	// IDs of components that moved, because a Cable rewrite they wait for
+	// has not landed. It is bounded.
+	//
+	// +kubebuilder:validation:MaxItems=100
+	// +listType=atomic
+	// +optional
+	InterimDevices []InterimDevice `json:"interimDevices,omitempty"`
+
+	// InterimDevicesTruncated is true when InterimDevices omits entries.
+	// +optional
+	InterimDevicesTruncated bool `json:"interimDevicesTruncated,omitempty"`
+
 	// PendingReleases lists records another writer created while this
 	// controller was applying them, whose fields this controller has not yet
 	// released. Each is retried on every Create-mode reconcile, and its target
@@ -312,6 +339,27 @@ type NetBoxSourceStatus struct {
 	// +listType=atomic
 	// +optional
 	PendingReleases []PendingRelease `json:"pendingReleases,omitempty"`
+}
+
+// InterimDevice is a Device whose interim apply kept the old components its
+// Cables name, and whose planned apply, which drops them, has not landed.
+type InterimDevice struct {
+	// Name is the Fleet Device name.
+	Name string `json:"name"`
+	// Source is the source record key, such as dcim/devices/12.
+	Source string `json:"source"`
+	// WaitingFor names the Cables whose rewrite has not landed. It is empty
+	// when the planned apply itself failed.
+	//
+	// +kubebuilder:validation:MaxItems=16
+	// +listType=atomic
+	// +optional
+	WaitingFor []string `json:"waitingFor,omitempty"`
+	// Since is when a reconcile first left the Device interim.
+	Since metav1.Time `json:"since"`
+	// Message says why the Device is still interim.
+	// +optional
+	Message string `json:"message,omitempty"`
 }
 
 // PendingRelease is a record whose fields this controller still has to

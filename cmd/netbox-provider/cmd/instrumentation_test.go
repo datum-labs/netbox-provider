@@ -9,3 +9,7 @@ import (
 func TestInstrumentationAdopted(t *testing.T) {
 	instrumenttest.AssertAdopted(t)
 }
+
+func TestMetricsFollowPrometheusConventions(t *testing.T) {
+	instrumenttest.Lint(t)
+}
