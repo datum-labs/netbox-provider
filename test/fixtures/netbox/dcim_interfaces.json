@@ -1,7 +1,7 @@
 [
-  {"id": 2000, "device": {"id": 1000}, "name": "eth0", "type": {"value": "1000base-t", "label": "1000BASE-T"}, "mac_address": "must-not-be-retained"},
-  {"id": 2001, "device": {"id": 1000}, "name": "eth1", "type": {"value": "25gbase-x-sfp28"}},
-  {"id": 2002, "device": {"id": 1000}, "name": "bond0", "type": {"value": "lag"}},
+  {"id": 2000, "device": {"id": 1000}, "name": "eth0", "type": {"value": "1000base-t", "label": "1000BASE-T"}, "mac_address": "02:00:00:AA:10:00", "primary_mac_address": {"id": 4000, "url": "https://netbox.example.invalid/api/dcim/mac-addresses/4000/", "display": "02:00:00:AA:10:00", "mac_address": "02:00:00:AA:10:00", "description": "must-not-be-retained"}},
+  {"id": 2001, "device": {"id": 1000}, "name": "eth1", "type": {"value": "25gbase-x-sfp28"}, "mac_address": "02-00-00-aa-10-01"},
+  {"id": 2002, "device": {"id": 1000}, "name": "bond0", "type": {"value": "lag"}, "mac_address": "02:00:00:aa:10:02", "primary_mac_address": {"id": 4002, "mac_address": "02:00:00:aa:10:02"}},
   {"id": 2003, "device": {"id": 1001}, "name": "eth0", "type": {"value": "1000base-t"}},
   {"id": 2004, "device": {"id": 1003}, "name": "eth0", "type": {"value": "1000base-t"}},
   {"id": 2010, "device": {"id": 1007}, "name": "swp1", "type": {"value": "25gbase-x-sfp28"}},

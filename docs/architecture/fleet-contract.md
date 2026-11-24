@@ -30,7 +30,9 @@ written.
 Racks, PowerFeeds, Manufacturers and DeviceTypes (Fleet's hardware catalog,
 datum-cloud/fleet#107), DeviceClaims, Devices with their components, internal
 mappings and `deviceTypeRef`, and Cables, with only the physical facts in the
-[design](design.md#mapping-netbox-to-fleet). A Device in a role the mapping
+[design](design.md#mapping-netbox-to-fleet). A Device carries the MACs NetBox
+records on its physical interfaces in `spec.interfaces[].macAddress`, as
+expected facts for discovery to compare. A Device in a role the mapping
 lists also gets `spec.bmc.endpoint` from NetBox's out-of-band IP. That copy
 is interim: Fleet assigns out-of-band BMC addresses to Networking/IPAM, and
 datum-cloud/fleet#132 tracks replacing it with a reference to an IPAM-issued
@@ -42,7 +44,10 @@ annotations (see [Writes](design.md#writes-server-side-apply)). It creates
 missing records and updates the fields it owns; other writers' fields are
 kept, and a field another writer owns is a quarantined conflict. It never
 writes Facilities, Sites, status, `reportedPlacement`, `MachineCapacity` or
-`deviceRef`, and never deletes a record.
+`deviceRef`, and never deletes a record. A Device's spec holds what NetBox
+expects; its status belongs to Fleet discovery (datum-cloud/fleet#130), which
+reports what the BMC finds. This controller never sends status, so another
+writer's status is never changed, and is never drift.
 
 Fleet requires a Device to have a serial or system UUID, or to say explicitly
 that it has no recorded hardware identity. The controller writes the serial

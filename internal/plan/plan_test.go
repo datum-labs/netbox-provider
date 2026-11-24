@@ -251,7 +251,7 @@ func TestFixturePlan(t *testing.T) {
 
 	for _, c := range p.Candidates {
 		encoded, _ := json.Marshal(c.Object.Object)
-		for _, forbidden := range []string{`"provenance"`, "recordedBy", "recordedAt", `"source"`, "sourceIdentity", "sourceRef", "upstreamSources", "Import", `"status"`, "must-not-be-retained"} {
+		for _, forbidden := range []string{`"provenance"`, "recordedBy", "recordedAt", `"source"`, "sourceIdentity", "sourceRef", "upstreamSources", "Import", `"status"`, "must-not-be-retained", "synthetic-oob-secret-7f3a"} {
 			if strings.Contains(string(encoded), forbidden) {
 				t.Errorf("%s contains %s", c.Key(), forbidden)
 			}
@@ -453,6 +453,32 @@ func TestRecordsCorrelatedByLabelsAreUnchanged(t *testing.T) {
 	p := plan.Build(withExisting(input(t), objs...))
 	if p.Count(plan.ActionUnchanged) != len(objs) || p.Count(plan.ActionCreate) != 0 {
 		t.Fatalf("outcomes %v", outcomes(p))
+	}
+}
+
+func TestStatusAnotherWriterOwnsIsNeverDrift(t *testing.T) {
+	objs := previous(t)
+	for i := range objs {
+		if objs[i].GetKind() != fleet.KindDevice {
+			continue
+		}
+		// Discovery owns status, through the status subresource.
+		_ = unstructured.SetNestedField(objs[i].Object, map[string]any{
+			"reported": map[string]any{"systemUUID": "00000000-0000-4000-8000-000000000001", "interfaces": []any{map[string]any{"name": "eth0", "macAddress": "02:00:00:aa:99:99"}}},
+		}, "status")
+		objs[i].SetManagedFields(append(objs[i].GetManagedFields(), metav1.ManagedFieldsEntry{
+			Manager: "example-bmc-discovery", Operation: metav1.ManagedFieldsOperationApply, APIVersion: "fleet.datumapis.com/v1alpha1", Subresource: "status",
+			FieldsV1: metav1.NewFieldsV1(`{"f:status":{"f:reported":{}}}`),
+		}))
+	}
+	p := plan.Build(withExisting(input(t), objs...))
+	if p.Count(plan.ActionUnchanged) != len(objs) {
+		t.Fatalf("outcomes %v", outcomes(p))
+	}
+	for _, c := range p.Candidates {
+		if _, ok := c.Object.Object["status"]; ok {
+			t.Errorf("%s carries status", c.Key())
+		}
 	}
 }
 

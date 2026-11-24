@@ -13,6 +13,12 @@ the owner of the schema.
 | Last commit touching the file | `5e67e972c37ad3c28b5bf9365c4e873c5dee016f` |
 | sha256 | `6609923b6df7743d75861eb62edffb9a96d47b2ddab2c6a548404f0c7be8d971` |
 
+Fleet's Device CRD enables the status subresource but declares `status` as an
+empty object, which prunes every status field. The envtest suite reads this file
+and, in memory only, lets `Device.status` keep unknown fields, so its tests can
+show that a status another writer filled survives this controller's applies.
+The file itself stays verbatim.
+
 The envtest suite checks the sha256, so re-vendoring must update this table and
 `vendoredFleetCRDDigest` in `internal/controller/admission_test.go` together.
 To re-vendor, copy the file from the chosen Fleet commit without editing it, then
