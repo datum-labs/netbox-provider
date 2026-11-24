@@ -110,9 +110,9 @@ record leader transitions) and read access to NetBoxSources, NetBoxMappings and
 Secrets, all in `netbox-provider-system`, and status writes on NetBoxSources.
 The manager's cache is scoped to that namespace with `--namespace`, so
 NetBoxSources in other namespaces are ignored. Secrets in that namespace are
-listed and watched as metadata only, with annotations and labels dropped, so a
-Secret change requeues the sources that name it; the token is fetched with an
-uncached `get` and never cached. The namespace has Flux pruning disabled so uninstalling
+listed and watched as metadata only, with annotations and labels dropped. A
+change to a Secret's token requeues the sources that name it; the token is
+fetched with an uncached `get` and never cached. The namespace has Flux pruning disabled so uninstalling
 a release cannot delete environment-owned sources, mappings or tokens.
 
 The manager holds one lease (`netbox-provider-manager.netbox.miloapis.com`) in

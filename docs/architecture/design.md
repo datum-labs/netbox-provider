@@ -112,8 +112,15 @@ three the device is `Unresolved`, never placed by inference.
    manager's namespace, with annotations and labels dropped before caching, so
    no token is ever cached: kubectl's client-side apply copies a Secret's data
    into its `last-applied-configuration` annotation. A change to a Secret
-   requeues the sources whose `tokenSecretRef` names it; a change to any other
-   Secret requeues nothing. A missing mapping, Secret, or key, or an empty or
+   requeues a source whose `tokenSecretRef` names it only when the token it
+   now holds differs from the one that source's last reconcile resolved for
+   its current generation. The watch reads the token with an uncached `get`
+   to compare, and only when a source names the Secret. So a change to its
+   labels or annotations reads nothing from NetBox, and a change to any other
+   Secret requeues nothing. Only a sha256 of each source's last token is kept,
+   in memory; it never reaches status or logs. A Secret the watch cannot read,
+   or a deleted one, requeues every source that names it. Resyncs, which carry
+   no change, are ignored. A missing mapping, Secret, or key, or an empty or
    whitespace token, sets `ConfigurationResolved=False`, makes no NetBox
    request, and is re-checked every minute as well as on the watch.
 2. **Read NetBox.** One sequential, complete read of sites, locations, racks,
@@ -299,20 +306,45 @@ components changed. The DeviceType's templates and the Cables that name a
 moved component are Updates in the same plan. The move uses the same staged
 cutover as the move to template IDs: the Device's interim keeps the old ID
 while its Cables move, and the planned Device drops it once they are written.
-So within one reconcile the Device is applied twice, the Cable and the
-DeviceType once each, and no Cable names a component its Device lacks after
-any write. The next reconcile writes nothing. Nothing flips back on later
+So within one reconcile the Device is applied twice, the Cable once, and the
+DeviceType once when its templates changed (a component renamed in NetBox
+leaves it unchanged). No Cable names a component its Device lacks after any
+write, with one exception: a Device whose interim would exceed Fleet's 256
+components is applied in one step, as described above, and its Cables name
+missing components until they are applied later in the same reconcile. The
+next reconcile writes nothing. Nothing flips back on later
 reconciles: the IDs change again only when the templates or component names
 change again in NetBox. The plan test
 `TestTemplateChangesMoveComponentIDsInOneDeviceUpdate` and the envtest
 `moves one component between its template and instance IDs with one Device
-update each way` count these writes in both directions.
+update each way` count these writes in both directions for a template
+renamed, deleted and restored, and a component renamed in NetBox, and the
+plan test also for a second template with the same name. Both check for
+Cables naming missing components after every write.
 
 A moved component is a new Fleet component entry, because its ID is the
 entry's key. Fields another writer set on the old entry, such as an
-operator's `assetTag`, are not carried to the new ID. Server-side apply keeps
-the old entry with only that writer's fields, and the controller leaves it
-alone, as it does any entry only another manager owns.
+operator's `assetTag`, are not carried to the new ID. While that writer owns
+a field there, the move cannot finish. The planned Device drops the old
+entry, and server-side apply would keep it with only the other writer's
+fields. But Fleet requires a component's `name` and `type`, so it rejects
+the apply. The Device is then `Quarantined/Rejected` with Fleet's message,
+and the interim stays. The old entry keeps its `name`, `type` and the other
+writer's field, and the new entry sits beside it. Every Cable names a
+component the Device has, since the Cable moved after the interim. The
+controller never removes the other writer's field.
+
+- On the reconcile that staged the move, the Device is listed in
+  `status.interimDevices` with an empty `waitingFor`.
+- Later reconciles apply the planned Device in one step, because no Cable
+  names the old ID any more. Each is rejected the same way. The Device stays
+  `Quarantined/Rejected`, `Ready` is `False`, and the Device is no longer
+  listed as interim.
+- Once the other writer releases its field, the next reconcile removes the
+  old entry.
+
+The envtest `keeps another writer's field on the old component entry, and is
+quarantined until that writer lets go` covers this.
 
 ### Cable references
 
@@ -526,14 +558,14 @@ fixed budget.
 | Records not written by this controller are never adopted | Same name without matching correlation labels is `Quarantined/NameConflict`, even with an identical spec; Flux labels are named in the message | `never adopts an identical record that lacks this controller's labels`, `rejects an existing name from another writer`, `TestSameNameWithoutOurLabelsIsNeverAdopted` |
 | Equal records are no-ops; owned fields follow NetBox | Correlated by labels and this controller's apply ownership; unchanged digest and values send nothing, differences are `Update`. Records it did not apply are `Quarantined/NotApplyOwned` | `then is a no-op`, `TestOwnedFieldChangeIsUpdated`, `TestRecordNotAppliedByThisControllerIsNeverAdopted` |
 | A template edit moves component IDs once, with no dangling Cable | One Device Update per affected Device, staged through its interim; its Cables and DeviceType are updated in the same plan; the next plan writes nothing | `TestTemplateChangesMoveComponentIDsInOneDeviceUpdate`, `moves one component between its template and instance IDs with one Device update each way` |
-| Undelivered Cable references and interim Devices are visible | `CableReferencesDelivered`, `status.undeliveredCableReferences`, `status.interimDevices` and two gauges, recomputed from Fleet on every reconcile | `TestUndeliveredReferences`, `is True with zero gauges when every Cable names components its Device has`, `lists a Device left interim by a blocked Cable write, and recovers once the Cable lands`, `reports a Cable this plan does not write that names a component its Device dropped, on every reconcile`, `drops a deleted source's series` |
+| Undelivered Cable references and interim Devices are visible | `CableReferencesDelivered`, `status.undeliveredCableReferences`, `status.interimDevices` and two gauges, recomputed from Fleet on every reconcile | `TestUndeliveredReferences`, `is True with zero gauges when every Cable names components its Device has`, `lists a Device left interim by a blocked Cable write, and recovers once the Cable lands`, `reports a Cable this plan does not write that names a component its Device dropped, on every reconcile`, `previews the undelivered references Create mode would leave, writing nothing`, `reports no interim Device for a staged move, since nothing is applied`, `caps interimDevices at 100 and waitingFor at 16, keeps the full count, and the status write succeeds`, `drops a deleted source's series` |
 | Identity collisions are quarantined | Serial, system UUID, asset tag, provider host ID, or provider host ID versus serial matching another Device | `quarantines an identity collision`, `TestIdentityCollisionsAreQuarantined` |
 | No duplicate of a source already labelled under another name | `Quarantined/SourceAlreadyRecorded` | `TestSourceLabelledUnderAnotherNameIsNotDuplicated` |
 | No invented identity | A Device without a reviewed chassis serial carries the unidentified marker, never a serial; a provider-hosted server is `Unresolved/IdentityUnavailable` with its claim still created | `records a device without a chassis serial as unidentified`, `TestDeviceWithoutSerialIsRecordedAsUnidentified`, `admits the unidentified marker only without serial, system UUID or BMC` |
 | Claim and device stay together; dependents of blocked records are blocked | Fixed-point propagation in the plan; skipped dependents at apply time | plan and reconcile specs |
 | Never delete on omission | No delete code path; missing sources are reported `RetainedMissingSource` | `never deletes records whose source disappears`, `TestOmittedSourceRecordsAreRetained` |
 | A rejected token is not retried quickly | `401`/`403` is `TokenRejected` with a requeue of at least an hour; status writes do not trigger reconciles; a Secret event that leaves the token unchanged does not resend it | `does not retry a rejected token for at least an hour`, `is not sent again for the same generation until its retry time, and a new token is`, `does not resend a rejected token when the Secret changes but its token does not`, `TestErrorsNeverReturnPartialRecordsOrBodies` |
-| A rotated token takes effect at once, and tokens are never cached | Secrets are watched as metadata only, without annotations, and requeue only the sources that name them | `picks up a rotated token without a spec edit or waiting for the interval`, `enqueues nothing for a Secret no source references, and the source for its own Secret`, `caches Secret metadata only, without annotations or data` |
+| A rotated token takes effect at once, and tokens are never cached | Secrets are watched as metadata only, without annotations; a change requeues only the sources that name the Secret, and only when its token changed; resyncs are ignored | `picks up a rotated token without a spec edit or waiting for the interval`, `enqueues nothing for a Secret no source references, nor for a metadata edit that keeps the token, and the source when its token changes`, `lists and watches Secrets only as metadata, never as typed Secrets`, `ignores Secret resyncs, which carry no change`, `caches Secret metadata only, without annotations or data` |
 | Uncertainty is Unknown | NetBox, Fleet and ambiguous create failures set Unknown conditions | `reports NetBox failures as Unknown`, `reports Fleet read failures as Unknown` |
 | Generated records pass Fleet admission | envtest installs the vendored Fleet CRD and creates every fixture candidate | `admits every candidate the fixture plan creates` |
 

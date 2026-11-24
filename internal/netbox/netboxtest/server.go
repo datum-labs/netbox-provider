@@ -130,6 +130,13 @@ func (s *Server) Set(collection string, id int, field string, value any) {
 	}
 }
 
+// Add appends a record to a collection.
+func (s *Server) Add(collection string, record map[string]any) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.data[collection] = append(s.data[collection], record)
+}
+
 // Remove deletes a record from a collection.
 func (s *Server) Remove(collection string, id int) {
 	s.mu.Lock()

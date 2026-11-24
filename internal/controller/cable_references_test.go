@@ -4,10 +4,12 @@ package controller
 
 import (
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
@@ -131,6 +133,113 @@ var _ = Describe("Cable references in status", func() {
 			Expect(interim).To(BeZero())
 			Expect(undelivered).To(Equal(1.0))
 		}
+	})
+
+	Describe("in Observe mode", func() {
+		observe := func(h *harness) {
+			s := h.source()
+			s.Spec.Mode = netboxv1alpha1.SourceModeObserve
+			Expect(k8sClient.Update(ctx, s)).To(Succeed())
+		}
+
+		It("previews the undelivered references Create mode would leave, writing nothing", func() {
+			h := withInstanceIDs()
+			h.server.Remove(netbox.CollectionCables, 5000)
+			observe(h)
+			before := len(h.recorder.Applies())
+			at(h, time.Hour)
+			_, err := h.reconcile()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(h.recorder.Applies()[before:]).To(BeEmpty())
+			s := h.source()
+			Expect(condition(s, ConditionCableReferencesDelivered)).To(SatisfyAll(
+				HaveField("Status", metav1.ConditionFalse), HaveField("Reason", ReasonUndeliveredReferences),
+				HaveField("Message", SatisfyAll(
+					ContainSubstring("would name, once this plan is written,"),
+					ContainSubstring("Cable/"+cableName+" -> Device/"+deviceName+" component interfaces-2001")))))
+			Expect(s.Status.UndeliveredCableReferences).To(Equal(int32(1)))
+			Expect(s.Status.InterimDeviceCount).To(BeZero())
+			_, undelivered := gauges(h)
+			Expect(undelivered).To(Equal(1.0))
+
+			// Create mode leaves exactly what the preview named.
+			s.Spec.Mode = netboxv1alpha1.SourceModeCreate
+			Expect(k8sClient.Update(ctx, s)).To(Succeed())
+			at(h, 2*time.Hour)
+			_, err = h.reconcile()
+			Expect(err).NotTo(HaveOccurred())
+			s = h.source()
+			Expect(condition(s, ConditionCableReferencesDelivered).Message).To(SatisfyAll(
+				Not(ContainSubstring("would")), ContainSubstring("Cable/"+cableName+" -> Device/"+deviceName+" component interfaces-2001")))
+			Expect(s.Status.UndeliveredCableReferences).To(Equal(int32(1)))
+		})
+
+		It("reports no interim Device for a staged move, since nothing is applied", func() {
+			h := withInstanceIDs()
+			observe(h)
+			before := len(h.recorder.Applies())
+			at(h, time.Hour)
+			_, err := h.reconcile()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(h.recorder.Applies()[before:]).To(BeEmpty())
+			s := h.source()
+			Expect(recordFor(s, "dcim/devices/1000", "Device").State).To(Equal(netboxv1alpha1.RecordStateUpdate), "the move is planned")
+			Expect(condition(s, ConditionCableReferencesDelivered)).To(SatisfyAll(
+				HaveField("Status", metav1.ConditionTrue), HaveField("Reason", ReasonDelivered)))
+			Expect(s.Status.InterimDeviceCount).To(BeZero())
+			Expect(s.Status.InterimDevices).To(BeEmpty())
+			interim, undelivered := gauges(h)
+			Expect(interim).To(BeZero())
+			Expect(undelivered).To(BeZero())
+		})
+	})
+
+	It("caps interimDevices at 100 and waitingFor at 16, keeps the full count, and the status write succeeds", func() {
+		h := newHarness().withSourceAndToken(netboxv1alpha1.SourceModeCreate)
+		_, err := h.reconcile()
+		Expect(err).NotTo(HaveOccurred())
+		source := h.source()
+		set := func(conditionType string, status metav1.ConditionStatus, reason, message string) {
+			apimeta.SetStatusCondition(&source.Status.Conditions, metav1.Condition{Type: conditionType, Status: status, Reason: reason, Message: message})
+		}
+		// 150 Devices left interim, each waiting for 20 Cables.
+		const devices, cables = 150, 20
+		p := &plan.Plan{}
+		interim := map[string][]string{}
+		for i := range devices {
+			c := &plan.Candidate{
+				Kind: fleet.KindDevice, Name: fmt.Sprintf("example-device-%03d", i), Source: fmt.Sprintf("dcim/devices/%d", 9000+i),
+				Object: fleetObject(fleet.KindDevice, h.namespace, fmt.Sprintf("example-device-%03d", i), map[string]any{}),
+				Action: actionUpdated, Message: "keeps the old components until its Cables are written",
+			}
+			p.Candidates = append(p.Candidates, c)
+			for j := range cables {
+				interim[c.Key()] = append(interim[c.Key()], fmt.Sprintf("example-cable-%03d-%02d", i, j))
+			}
+		}
+		h.r.reportCableReferences(source, p, plan.Existing{}, interim, 0, set)
+		Expect(h.r.updateStatus(ctx, source)).To(Succeed())
+
+		s := h.source()
+		Expect(s.Status.InterimDeviceCount).To(Equal(int32(devices)))
+		Expect(s.Status.InterimDevicesTruncated).To(BeTrue())
+		Expect(s.Status.InterimDevices).To(HaveLen(maxInterimDevices))
+		Expect(s.Status.InterimDevices[0].Name).To(Equal("example-device-000"))
+		Expect(s.Status.InterimDevices[maxInterimDevices-1].Name).To(Equal("example-device-099"))
+		for _, d := range s.Status.InterimDevices {
+			Expect(d.WaitingFor).To(HaveLen(maxWaitingFor))
+		}
+		Expect(condition(s, ConditionCableReferencesDelivered)).To(SatisfyAll(
+			HaveField("Reason", ReasonInterimDevices), HaveField("Message", ContainSubstring("150 Devices")), HaveField("Message", ContainSubstring("and 147 more"))))
+		interimGauge, _ := gauges(h)
+		Expect(interimGauge).To(Equal(float64(devices)), "the gauge counts every Device, not only those listed")
+
+		// Without the cap, the CRD refuses the whole status write.
+		over := s.DeepCopy()
+		over.Status.InterimDevices = append(over.Status.InterimDevices, netboxv1alpha1.InterimDevice{Name: "example-device-extra", Source: "dcim/devices/1", Since: metav1.Now()})
+		err = k8sClient.Status().Update(ctx, over)
+		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "%v", err)
+		Expect(err.Error()).To(ContainSubstring("status.interimDevices"))
 	})
 
 	It("drops a deleted source's series", func() {
