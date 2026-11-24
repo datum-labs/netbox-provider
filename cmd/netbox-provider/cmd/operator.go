@@ -15,7 +15,6 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -106,16 +105,13 @@ func newOperatorCommand(info BuildInfo) *cobra.Command {
 				setupLog.Info("webhookServer not configured; admission webhook server disabled")
 			}
 
-			// NetBoxSources, NetBoxMappings and token Secrets are read only in
-			// the watched namespace, so the service account needs no
-			// cluster-wide role (see config/README.md).
-			var cacheOptions cache.Options
-			if watchNamespace != "" {
-				cacheOptions.DefaultNamespaces = map[string]cache.Config{watchNamespace: {}}
-			}
+			// NetBoxSources, NetBoxMappings and token Secrets are read and
+			// watched only in the watched namespace, so the service account
+			// needs no cluster-wide role (see config/README.md). Secrets are
+			// cached as metadata only.
 			mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 				Scheme:                  scheme,
-				Cache:                   cacheOptions,
+				Cache:                   controller.CacheOptions(watchNamespace),
 				Metrics:                 metricsServerOptions,
 				WebhookServer:           webhookServer,
 				HealthProbeBindAddress:  probeAddr,
@@ -165,7 +161,7 @@ func newOperatorCommand(info BuildInfo) *cobra.Command {
 	cmd.Flags().StringVar(&leaderElectionNamespace, "leader-election-namespace", "",
 		"Namespace of the leader-election lease. Setting it enables leader election, so only one replica reconciles.")
 	cmd.Flags().StringVar(&watchNamespace, "namespace", "",
-		"Only namespace whose NetBoxSources, NetBoxMappings and token Secrets are read. Empty reads every namespace and needs cluster-wide access.")
+		"Only namespace whose NetBoxSources, NetBoxMappings and token Secrets are read and watched. Empty reads every namespace, watches the metadata of every Secret, and needs cluster-wide access.")
 	cmd.Flags().StringVar(&serverConfigFile, "config", "", "Path to the operator config file.")
 
 	// zap.Options.BindFlags accepts *flag.FlagSet (stdlib). Bridge via pflag's

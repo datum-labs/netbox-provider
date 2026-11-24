@@ -34,8 +34,10 @@ type Server struct {
 	data     map[string][]map[string]any
 	pageSize int
 	failWith map[string]int
-	requests atomic.Int32
-	auth     []string
+	// acceptOnly, when set, is the only Authorization header accepted.
+	acceptOnly string
+	requests   atomic.Int32
+	auth       []string
 }
 
 // Collections served, matching the reader's collections.
@@ -101,6 +103,15 @@ func (s *Server) Authorizations() []string {
 	return slices.Clone(s.auth)
 }
 
+// AcceptOnly makes every request whose Authorization header is not
+// authorization answer 401, as NetBox does for a token it rejects; "" clears
+// it.
+func (s *Server) AcceptOnly(authorization string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.acceptOnly = authorization
+}
+
 // Fail makes a collection answer with an HTTP status; 0 clears it.
 func (s *Server) Fail(collection string, status int) {
 	s.mu.Lock()
@@ -141,6 +152,11 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	records, ok := s.data[collection]
 	if !ok || !strings.HasPrefix(r.URL.Path, Prefix+"/api/") {
 		http.NotFound(w, r)
+		return
+	}
+	if s.acceptOnly != "" && r.Header.Get("Authorization") != s.acceptOnly {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = fmt.Fprint(w, "synthetic-sensitive-error-body")
 		return
 	}
 	if status := s.failWith[collection]; status != 0 {

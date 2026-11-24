@@ -16,8 +16,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	ctrlconfig "sigs.k8s.io/controller-runtime/pkg/config"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/yaml"
 
@@ -210,6 +214,34 @@ func (h *harness) withSourceAndToken(mode netboxv1alpha1.SourceMode) *harness {
 	Expect(k8sClient.Create(ctx, tokenSecret(h.namespace, "token", testToken))).To(Succeed())
 	Expect(k8sClient.Create(ctx, newSource(h.namespace, h.server.RootURL(), mode))).To(Succeed())
 	return h
+}
+
+// startManager runs the reconciler under a manager with the operator's cache
+// options, scoped to the harness namespace, until the spec ends.
+func (h *harness) startManager() ctrl.Manager {
+	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
+		Scheme:  testScheme,
+		Metrics: metricsserver.Options{BindAddress: "0"},
+		Cache:   CacheOptions(h.namespace),
+		// Each spec starts its own manager with the same controller name.
+		Controller: ctrlconfig.Controller{SkipNameValidation: ptr.To(true)},
+	})
+	Expect(err).NotTo(HaveOccurred())
+	r := &NetBoxSourceReconciler{
+		Client:     mgr.GetClient(),
+		APIReader:  mgr.GetAPIReader(),
+		Fleet:      h.r.Fleet,
+		HTTPClient: h.r.HTTPClient,
+		Now:        h.r.Now,
+	}
+	Expect(r.SetupWithManager(mgr)).To(Succeed())
+	mgrCtx, stop := context.WithCancel(ctx)
+	DeferCleanup(stop)
+	go func() {
+		defer GinkgoRecover()
+		Expect(mgr.Start(mgrCtx)).To(Succeed())
+	}()
+	return mgr
 }
 
 func (h *harness) reconcile() (reconcile.Result, error) {
