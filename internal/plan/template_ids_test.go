@@ -3,6 +3,7 @@
 package plan_test
 
 import (
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -255,6 +256,181 @@ func TestCablesThePlanDoesNotWriteAreReported(t *testing.T) {
 	for _, h := range server.Holders {
 		if h == cable.Key() {
 			t.Fatalf("an unwritten cable is waited for: %v", server.Holders)
+		}
+	}
+}
+
+// fleetState is what Fleet holds, by Kind/name, as a reconcile applies a plan.
+type fleetState map[string]unstructured.Unstructured
+
+func (s fleetState) existing(in plan.Input) plan.Input {
+	in.Existing = map[string][]unstructured.Unstructured{fleet.KindFacility: {facility("example-premises-a")}}
+	for _, key := range sortedStateKeys(s) {
+		obj := s[key]
+		in.Existing[obj.GetKind()] = append(in.Existing[obj.GetKind()], obj)
+	}
+	return in
+}
+
+func sortedStateKeys(s fleetState) []string {
+	keys := make([]string, 0, len(s))
+	for k := range s {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// dangling returns each Cable endpoint that names a component its Device
+// does not have.
+func (s fleetState) dangling() []string {
+	components := map[string]bool{}
+	for key := range s {
+		obj := s[key]
+		if obj.GetKind() != fleet.KindDevice {
+			continue
+		}
+		comps, _, _ := unstructured.NestedSlice(obj.Object, "spec", "components")
+		for _, c := range comps {
+			components[obj.GetName()+"/"+c.(map[string]any)["id"].(string)] = true
+		}
+	}
+	var out []string
+	for _, key := range sortedStateKeys(s) {
+		obj := s[key]
+		if obj.GetKind() != fleet.KindCable {
+			continue
+		}
+		lanes, _, _ := unstructured.NestedSlice(obj.Object, "spec", "lanes")
+		for _, lane := range lanes {
+			for _, side := range []string{"a", "b"} {
+				device, _, _ := unstructured.NestedString(lane.(map[string]any), side, "deviceRef", "name")
+				id, _, _ := unstructured.NestedString(lane.(map[string]any), side, "componentID")
+				if device != "" && !components[device+"/"+id] {
+					out = append(out, obj.GetName()+" -> "+device+"/"+id)
+				}
+			}
+		}
+	}
+	return out
+}
+
+// applyPlan writes p into s the way the controller does when every write
+// succeeds: each kind after the kinds it references, a staged Device's interim
+// in place of its Object, and then each staged Device's Object. It fails the
+// test if a Cable names a missing component after any write, and returns the
+// writes per Kind/name.
+func (s fleetState) applyPlan(t *testing.T, p *plan.Plan) map[string]int {
+	t.Helper()
+	writes := map[string]int{}
+	write := func(obj *unstructured.Unstructured) {
+		key := obj.GetKind() + "/" + obj.GetName()
+		s[key] = *applied(obj.DeepCopy())
+		writes[key]++
+		if d := s.dangling(); len(d) > 0 {
+			t.Fatalf("after write %d of %s, Cables name missing components: %v", writes[key], key, d)
+		}
+	}
+	var staged []*plan.Candidate
+	for _, kind := range fleet.WriteKinds {
+		for _, c := range p.Candidates {
+			if c.Kind != kind || (c.Action != plan.ActionCreate && c.Action != plan.ActionUpdate) {
+				continue
+			}
+			if c.Interim != nil && c.Action == plan.ActionUpdate {
+				write(c.Interim)
+				staged = append(staged, c)
+				continue
+			}
+			write(c.Object)
+		}
+	}
+	for _, c := range staged {
+		write(c.Object)
+	}
+	return writes
+}
+
+func TestTemplateChangesMoveComponentIDsInOneDeviceUpdate(t *testing.T) {
+	deviceKey := fleet.KindDevice + "/" + plan.Name(key(plan.TypeDevice, "1000"), fleet.KindDevice)
+	cableKey := fleet.KindCable + "/" + plan.Name(key(plan.TypeCable, "5000"), fleet.KindCable)
+	typeKey := fleet.KindDeviceType + "/" + plan.Name(key(plan.TypeDeviceType, "500"), fleet.KindDeviceType)
+	renameEth1 := func(name string) func(plan.Input) {
+		return func(in plan.Input) {
+			for i := range in.Snapshot.Templates[netbox.CollectionInterfaceTemplates] {
+				if tmpl := &in.Snapshot.Templates[netbox.CollectionInterfaceTemplates][i]; tmpl.ID == 701 {
+					tmpl.Name = name
+				}
+			}
+		}
+	}
+	duplicateEth1 := func(in plan.Input) {
+		addTemplate(in, netbox.CollectionInterfaceTemplates, netbox.ComponentTemplate{ID: 705, DeviceType: &netbox.Ref{ID: 500}, Name: "eth1", Type: &netbox.Choice{Value: "25gbase-x-sfp28"}})
+	}
+
+	// Each step changes the templates from the step before, starting from the
+	// fixture fully applied with template IDs.
+	steps := []struct {
+		name   string
+		change func(plan.Input)
+		eth1   string
+	}{
+		{"template renamed: eth1 falls back to its instance ID", renameEth1("eth1 (renamed)"), "interfaces-2001"},
+		{"rename undone: eth1 takes the template ID again", renameEth1("eth1"), "interface-templates-701"},
+		{"second eth1 template added: eth1 falls back to its instance ID", duplicateEth1, "interfaces-2001"},
+	}
+	state := fleetState{}
+	state.applyPlan(t, plan.Build(input(t)))
+	var changes []func(plan.Input)
+	for i, step := range steps {
+		changes = append(changes, step.change)
+		build := func() *plan.Plan {
+			in := input(t)
+			in.Snapshot.ObservedAt = observedAt.Add(time.Duration(i+1) * time.Hour)
+			for _, change := range changes {
+				change(in)
+			}
+			return plan.Build(state.existing(in))
+		}
+
+		p := build()
+		writes := state.applyPlan(t, p)
+		var updated []string
+		for _, c := range p.Candidates {
+			if c.Action == plan.ActionUpdate {
+				updated = append(updated, c.Key())
+			}
+		}
+		want := []string{cableKey, deviceKey, typeKey}
+		sort.Strings(updated)
+		sort.Strings(want)
+		if !equalJSON(updated, want) {
+			t.Fatalf("%s: updates %v, want %v", step.name, updated, want)
+		}
+		// One Device Update, staged as two applies: the interim keeps the ID
+		// the Cable names until the Cable moves.
+		if writes[deviceKey] != 2 || writes[cableKey] != 1 || writes[typeKey] != 1 || len(writes) != 3 {
+			t.Fatalf("%s: writes %v", step.name, writes)
+		}
+		device := state[deviceKey]
+		comps, _, _ := unstructured.NestedSlice(device.Object, "spec", "components")
+		var eth1 []string
+		for _, c := range comps {
+			if c.(map[string]any)["name"] == "eth1" {
+				eth1 = append(eth1, c.(map[string]any)["id"].(string))
+			}
+		}
+		if !equalJSON(eth1, []string{step.eth1}) {
+			t.Fatalf("%s: eth1 has IDs %v, want %s", step.name, eth1, step.eth1)
+		}
+		lanes, _, _ := unstructured.NestedSlice(state[cableKey].Object, "spec", "lanes")
+		if got := lanes[0].(map[string]any)["a"].(map[string]any)["componentID"]; got != step.eth1 {
+			t.Fatalf("%s: Cable names %v, want %s", step.name, got, step.eth1)
+		}
+
+		// The next plan from the same NetBox writes nothing.
+		if next := build(); next.Count(plan.ActionCreate)+next.Count(plan.ActionUpdate) != 0 {
+			t.Fatalf("%s: the next plan writes %d creates and %d updates", step.name, next.Count(plan.ActionCreate), next.Count(plan.ActionUpdate))
 		}
 	}
 }

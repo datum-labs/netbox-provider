@@ -266,6 +266,38 @@ later in the same reconcile.
 After the move, the next reconcile writes nothing: the planned Device and
 Cables match what was applied.
 
+**Template edits move component IDs.** Matching is by name, at snapshot time,
+and NetBox does not rename a device's components when their template is
+renamed. So an edit to a device type's templates changes the IDs of components
+that already exist, on the next reconcile:
+
+- Renaming a template, deleting it, or adding a second template with the same
+  name and Fleet type makes its components fall back to their instance IDs.
+- Undoing that, or adding a template that matches a component that had none,
+  moves them to the template ID.
+- A component renamed in NetBox to match, or stop matching, a template moves
+  the same way.
+
+Each affected Device gets one Update in the plan, with only the moved
+components changed. The DeviceType's templates and the Cables that name a
+moved component are Updates in the same plan. The move uses the same staged
+cutover as the move to template IDs: the Device's interim keeps the old ID
+while its Cables move, and the planned Device drops it once they are written.
+So within one reconcile the Device is applied twice, the Cable and the
+DeviceType once each, and no Cable names a component its Device lacks after
+any write. The next reconcile writes nothing. Nothing flips back on later
+reconciles: the IDs change again only when the templates or component names
+change again in NetBox. The plan test
+`TestTemplateChangesMoveComponentIDsInOneDeviceUpdate` and the envtest
+`moves one component between its template and instance IDs with one Device
+update each way` count these writes in both directions.
+
+A moved component is a new Fleet component entry, because its ID is the
+entry's key. Fields another writer set on the old entry, such as an
+operator's `assetTag`, are not carried to the new ID. Server-side apply keeps
+the old entry with only that writer's fields, and the controller leaves it
+alone, as it does any entry only another manager owns.
+
 ## Hardware catalog
 
 Fleet's hardware catalog (datum-cloud/fleet#107) records Manufacturers and
@@ -437,6 +469,7 @@ fixed budget.
 | No two Devices share a BMC endpoint | A planned endpoint equal to another planned or existing Device's, from any writer, quarantines it | `TestDevicesNeverShareABMCEndpoint` |
 | Records not written by this controller are never adopted | Same name without matching correlation labels is `Quarantined/NameConflict`, even with an identical spec; Flux labels are named in the message | `never adopts an identical record that lacks this controller's labels`, `rejects an existing name from another writer`, `TestSameNameWithoutOurLabelsIsNeverAdopted` |
 | Equal records are no-ops; owned fields follow NetBox | Correlated by labels and this controller's apply ownership; unchanged digest and values send nothing, differences are `Update`. Records it did not apply are `Quarantined/NotApplyOwned` | `then is a no-op`, `TestOwnedFieldChangeIsUpdated`, `TestRecordNotAppliedByThisControllerIsNeverAdopted` |
+| A template edit moves component IDs once, with no dangling Cable | One Device Update per affected Device, staged through its interim; its Cables and DeviceType are updated in the same plan; the next plan writes nothing | `TestTemplateChangesMoveComponentIDsInOneDeviceUpdate`, `moves one component between its template and instance IDs with one Device update each way` |
 | Identity collisions are quarantined | Serial, system UUID, asset tag, provider host ID, or provider host ID versus serial matching another Device | `quarantines an identity collision`, `TestIdentityCollisionsAreQuarantined` |
 | No duplicate of a source already labelled under another name | `Quarantined/SourceAlreadyRecorded` | `TestSourceLabelledUnderAnotherNameIsNotDuplicated` |
 | No invented identity | A Device without a reviewed chassis serial carries the unidentified marker, never a serial; a provider-hosted server is `Unresolved/IdentityUnavailable` with its claim still created | `records a device without a chassis serial as unidentified`, `TestDeviceWithoutSerialIsRecordedAsUnidentified`, `admits the unidentified marker only without serial, system UUID or BMC` |
