@@ -106,9 +106,14 @@ three the device is `Unresolved`, never placed by inference.
 ## Reconcile flow
 
 1. **Resolve configuration.** Read the mapping (cached, watched) and the token
-   Secret (uncached `get` only, polled every minute, so Secrets are never cached
-   cluster-wide). A missing mapping, Secret, or key, or an empty or whitespace
-   token, sets `ConfigurationResolved=False` and makes no NetBox request.
+   Secret (an uncached `get`). Secrets are watched as metadata only, in the
+   manager's namespace, with annotations and labels dropped before caching, so
+   no token is ever cached: kubectl's client-side apply copies a Secret's data
+   into its `last-applied-configuration` annotation. A change to a Secret
+   requeues the sources whose `tokenSecretRef` names it; a change to any other
+   Secret requeues nothing. A missing mapping, Secret, or key, or an empty or
+   whitespace token, sets `ConfigurationResolved=False`, makes no NetBox
+   request, and is re-checked every minute as well as on the watch.
 2. **Read NetBox.** One sequential, complete read of sites, locations, racks,
    device types, devices, their components, power panels and feeds, cables,
    and the devices' out-of-band IP records. Each collection read is bounded
@@ -118,7 +123,13 @@ three the device is `Unresolved`, never placed by inference.
    NetBox installations commonly ban addresses after repeated rejections. It
    sets `ConfigurationResolved=False` and `Ready=False` with reason
    `TokenRejected` and is retried after the source's interval or one hour,
-   whichever is longer, never through the error backoff.
+   whichever is longer, never through the error backoff. Rotating the token
+   takes effect at once: the Secret watch requeues the source, and a token
+   that differs from the rejected one is sent without waiting. The rejected
+   token is not sent again before its retry time, whatever requeued the
+   source, unless the source's spec changed. Only a sha256 of it is kept, in
+   memory; it never reaches status or logs, and a restarted controller tries
+   it once more.
 3. **Read Fleet.** List Facility, Rack, PowerFeed, DeviceClaim, Device and Cable in the target
    namespace through an uncached client. Any failure sets `FleetObserved=Unknown`
    and `Ready=Unknown`.
@@ -442,7 +453,8 @@ fixed budget.
 | No invented identity | A Device without a reviewed chassis serial carries the unidentified marker, never a serial; a provider-hosted server is `Unresolved/IdentityUnavailable` with its claim still created | `records a device without a chassis serial as unidentified`, `TestDeviceWithoutSerialIsRecordedAsUnidentified`, `admits the unidentified marker only without serial, system UUID or BMC` |
 | Claim and device stay together; dependents of blocked records are blocked | Fixed-point propagation in the plan; skipped dependents at apply time | plan and reconcile specs |
 | Never delete on omission | No delete code path; missing sources are reported `RetainedMissingSource` | `never deletes records whose source disappears`, `TestOmittedSourceRecordsAreRetained` |
-| A rejected token is not retried quickly | `401`/`403` is `TokenRejected` with a requeue of at least an hour; status writes do not trigger reconciles | `does not retry a rejected token for at least an hour`, `TestErrorsNeverReturnPartialRecordsOrBodies` |
+| A rejected token is not retried quickly | `401`/`403` is `TokenRejected` with a requeue of at least an hour; status writes do not trigger reconciles; a Secret event that leaves the token unchanged does not resend it | `does not retry a rejected token for at least an hour`, `is not sent again for the same generation until its retry time, and a new token is`, `does not resend a rejected token when the Secret changes but its token does not`, `TestErrorsNeverReturnPartialRecordsOrBodies` |
+| A rotated token takes effect at once, and tokens are never cached | Secrets are watched as metadata only, without annotations, and requeue only the sources that name them | `picks up a rotated token without a spec edit or waiting for the interval`, `enqueues nothing for a Secret no source references, and the source for its own Secret`, `caches Secret metadata only, without annotations or data` |
 | Uncertainty is Unknown | NetBox, Fleet and ambiguous create failures set Unknown conditions | `reports NetBox failures as Unknown`, `reports Fleet read failures as Unknown` |
 | Generated records pass Fleet admission | envtest installs the vendored Fleet CRD and creates every fixture candidate | `admits every candidate the fixture plan creates` |
 

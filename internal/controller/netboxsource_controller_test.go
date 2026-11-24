@@ -12,11 +12,8 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
-	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	netboxv1alpha1 "go.miloapis.com/netbox-provider/api/v1alpha1"
 	"go.miloapis.com/netbox-provider/internal/fleet"
@@ -354,21 +351,7 @@ var _ = Describe("NetBoxSource reconcile", func() {
 		s.Spec.MappingRef.Name = "late"
 		Expect(k8sClient.Create(ctx, s)).To(Succeed())
 
-		mgr, err := ctrl.NewManager(cfg, ctrl.Options{
-			Scheme:  testScheme,
-			Metrics: metricsserver.Options{BindAddress: "0"},
-			Cache:   cache.Options{DefaultNamespaces: map[string]cache.Config{h.namespace: {}}},
-		})
-		Expect(err).NotTo(HaveOccurred())
-		r := *h.r
-		r.Client, r.APIReader = mgr.GetClient(), mgr.GetAPIReader()
-		Expect(r.SetupWithManager(mgr)).To(Succeed())
-		mgrCtx, stop := context.WithCancel(ctx)
-		DeferCleanup(stop)
-		go func() {
-			defer GinkgoRecover()
-			Expect(mgr.Start(mgrCtx)).To(Succeed())
-		}()
+		h.startManager()
 
 		Eventually(func() string { return condition(h.source(), ConditionConfigurationResolved).Reason }, 20*time.Second).Should(Equal(ReasonMappingNotFound))
 		late := fixtureMapping(h.namespace)

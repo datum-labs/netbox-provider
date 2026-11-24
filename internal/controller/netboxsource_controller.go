@@ -4,11 +4,13 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -21,6 +23,7 @@ import (
 	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -67,7 +70,9 @@ const (
 
 const (
 	mappingIndex = "spec.mappingRef.name"
-	// pollInterval re-checks inputs that are not watched, such as Secrets.
+	secretIndex  = "spec.tokenSecretRef.name"
+	// pollInterval re-checks Fleet after an uncertain write, a pending
+	// release, or a configuration the user must fix.
 	pollInterval = time.Minute
 	// defaultInterval matches the CRD default for spec.interval.
 	defaultInterval = 30 * time.Minute
@@ -101,6 +106,19 @@ type NetBoxSourceReconciler struct {
 	Now func() time.Time
 	// NewReader builds the NetBox reader; nil uses netbox.New.
 	NewReader func(netbox.Config) (netbox.Reader, error)
+
+	// rejected remembers, per source, the token NetBox last rejected, so a
+	// Secret event that leaves the token unchanged does not send it again.
+	rejectedMu sync.Mutex
+	rejected   map[types.NamespacedName]rejection
+}
+
+// rejection is a token NetBox rejected. Only its digest is kept, in memory;
+// it never reaches status or logs.
+type rejection struct {
+	generation int64
+	digest     [sha256.Size]byte
+	retryAt    time.Time
 }
 
 // Access is declared by hand, not by kubebuilder RBAC markers, following
@@ -144,6 +162,11 @@ func (r *NetBoxSourceReconciler) Reconcile(ctx context.Context, req reconcile.Re
 		set(ConditionReady, metav1.ConditionFalse, reason, message)
 		return ctrl.Result{RequeueAfter: pollInterval}, r.updateStatus(ctx, &source)
 	}
+	// A token NetBox rejected is not sent again before its retry time, whatever
+	// triggered this reconcile, unless the token or the spec changed.
+	if wait := r.rejectedFor(req.NamespacedName, source.Generation, token); wait > 0 {
+		return ctrl.Result{RequeueAfter: wait}, nil
+	}
 	set(ConditionConfigurationResolved, metav1.ConditionTrue, ReasonResolved, "mapping and token resolved")
 
 	// Read NetBox. A failed or partial read is Unknown; nothing is planned
@@ -160,7 +183,8 @@ func (r *NetBoxSourceReconciler) Reconcile(ctx context.Context, req reconcile.Re
 	snapshot, err := reader.Snapshot(ctx, netbox.Scope{SiteIDs: source.Spec.Scope.SiteIDs}, r.now())
 	if errors.Is(err, netbox.ErrCredentialsRejected) {
 		retry := max(rejectedCredentialsInterval, interval(source))
-		message := fmt.Sprintf("NetBox rejected the token; it is not retried for %s: %v", retry, err)
+		r.rememberRejected(req.NamespacedName, source.Generation, token, retry)
+		message := fmt.Sprintf("NetBox rejected the token; it is not retried for %s unless the Secret's token changes: %v", retry, err)
 		set(ConditionConfigurationResolved, metav1.ConditionFalse, ReasonTokenRejected, message)
 		set(ConditionSourceObserved, metav1.ConditionUnknown, ReasonReadFailed, "no complete NetBox observation")
 		set(ConditionApplied, metav1.ConditionUnknown, ReasonNotAttempted, "no complete NetBox observation")
@@ -177,6 +201,7 @@ func (r *NetBoxSourceReconciler) Reconcile(ctx context.Context, req reconcile.Re
 		}
 		return ctrl.Result{}, fmt.Errorf("reading NetBox: %w", err)
 	}
+	r.forgetRejected(req.NamespacedName)
 	set(ConditionSourceObserved, metav1.ConditionTrue, ReasonObserved, "complete read of the scoped collections")
 
 	// Read Fleet. Every kind must list completely before a plan is made.
@@ -273,6 +298,33 @@ func interval(source netboxv1alpha1.NetBoxSource) time.Duration {
 		return source.Spec.Interval.Duration
 	}
 	return defaultInterval
+}
+
+// rejectedFor returns how long the token must still wait when NetBox rejected
+// this same token for this generation of the source, and zero otherwise.
+func (r *NetBoxSourceReconciler) rejectedFor(key types.NamespacedName, generation int64, token string) time.Duration {
+	r.rejectedMu.Lock()
+	defer r.rejectedMu.Unlock()
+	rej, ok := r.rejected[key]
+	if !ok || rej.generation != generation || rej.digest != sha256.Sum256([]byte(token)) {
+		return 0
+	}
+	return max(rej.retryAt.Sub(r.now()), 0)
+}
+
+func (r *NetBoxSourceReconciler) rememberRejected(key types.NamespacedName, generation int64, token string, retry time.Duration) {
+	r.rejectedMu.Lock()
+	defer r.rejectedMu.Unlock()
+	if r.rejected == nil {
+		r.rejected = map[types.NamespacedName]rejection{}
+	}
+	r.rejected[key] = rejection{generation: generation, digest: sha256.Sum256([]byte(token)), retryAt: r.now().Add(retry)}
+}
+
+func (r *NetBoxSourceReconciler) forgetRejected(key types.NamespacedName) {
+	r.rejectedMu.Lock()
+	defer r.rejectedMu.Unlock()
+	delete(r.rejected, key)
 }
 
 func (r *NetBoxSourceReconciler) now() time.Time {
@@ -739,12 +791,21 @@ func (r *NetBoxSourceReconciler) updateStatus(ctx context.Context, source *netbo
 }
 
 // SetupWithManager sets up the controller with the Manager. It watches
-// NetBoxMappings and requeues the sources that reference them. Secrets are
-// polled, not watched, so Secrets are never cached cluster-wide.
+// NetBoxMappings and token Secrets and requeues the sources that reference
+// them. Secrets are watched as metadata only, through the cache CacheOptions
+// configures, so no token is ever cached; the reconciler reads the token with
+// an uncached get.
 func (r *NetBoxSourceReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &netboxv1alpha1.NetBoxSource{}, mappingIndex,
+	indexer := mgr.GetFieldIndexer()
+	if err := indexer.IndexField(context.Background(), &netboxv1alpha1.NetBoxSource{}, mappingIndex,
 		func(obj client.Object) []string {
 			return []string{obj.(*netboxv1alpha1.NetBoxSource).Spec.MappingRef.Name}
+		}); err != nil {
+		return err
+	}
+	if err := indexer.IndexField(context.Background(), &netboxv1alpha1.NetBoxSource{}, secretIndex,
+		func(obj client.Object) []string {
+			return []string{obj.(*netboxv1alpha1.NetBoxSource).Spec.TokenSecretRef.Name}
 		}); err != nil {
 		return err
 	}
@@ -754,6 +815,9 @@ func (r *NetBoxSourceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// requeues do.
 		For(&netboxv1alpha1.NetBoxSource{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Watches(&netboxv1alpha1.NetBoxMapping{}, handler.EnqueueRequestsFromMapFunc(r.sourcesForMapping)).
+		// Resyncs carry no change, so only a new resource version enqueues.
+		WatchesMetadata(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.sourcesForSecret),
+			builder.WithPredicates(predicate.ResourceVersionChangedPredicate{})).
 		WithOptions(controller.Options{
 			RateLimiter: workqueue.NewTypedItemExponentialFailureRateLimiter[reconcile.Request](failureBaseDelay, failureMaxDelay),
 		}).
@@ -761,8 +825,18 @@ func (r *NetBoxSourceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 }
 
 func (r *NetBoxSourceReconciler) sourcesForMapping(ctx context.Context, obj client.Object) []reconcile.Request {
+	return r.sourcesReferencing(ctx, mappingIndex, obj)
+}
+
+func (r *NetBoxSourceReconciler) sourcesForSecret(ctx context.Context, obj client.Object) []reconcile.Request {
+	return r.sourcesReferencing(ctx, secretIndex, obj)
+}
+
+// sourcesReferencing returns the sources in obj's namespace whose index field
+// names obj.
+func (r *NetBoxSourceReconciler) sourcesReferencing(ctx context.Context, index string, obj client.Object) []reconcile.Request {
 	var sources netboxv1alpha1.NetBoxSourceList
-	if err := r.Client.List(ctx, &sources, client.InNamespace(obj.GetNamespace()), client.MatchingFields{mappingIndex: obj.GetName()}); err != nil {
+	if err := r.Client.List(ctx, &sources, client.InNamespace(obj.GetNamespace()), client.MatchingFields{index: obj.GetName()}); err != nil {
 		return nil
 	}
 	requests := make([]reconcile.Request, 0, len(sources.Items))
@@ -770,4 +844,35 @@ func (r *NetBoxSourceReconciler) sourcesForMapping(ctx context.Context, obj clie
 		requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&s)})
 	}
 	return requests
+}
+
+// CacheOptions returns the manager cache options. A non-empty namespace scopes
+// the whole cache, including the Secret metadata watch, to that namespace.
+// Secrets are cached as metadata only, and every annotation is dropped before
+// caching: a Secret applied with kubectl carries its data in the
+// last-applied-configuration annotation. Secret data that ever reaches the
+// cache is dropped too, so the cache never holds a token.
+func CacheOptions(namespace string) cache.Options {
+	var opts cache.Options
+	if namespace != "" {
+		opts.DefaultNamespaces = map[string]cache.Config{namespace: {}}
+	}
+	opts.ByObject = map[client.Object]cache.ByObject{
+		&corev1.Secret{}: {Transform: stripSecret},
+	}
+	return opts
+}
+
+// stripSecret keeps only what the Secret watch needs: the name, namespace,
+// UID and resource version.
+func stripSecret(in any) (any, error) {
+	if secret, ok := in.(*corev1.Secret); ok {
+		secret.Data, secret.StringData = nil, nil
+	}
+	if obj, err := apimeta.Accessor(in); err == nil {
+		obj.SetAnnotations(nil)
+		obj.SetLabels(nil)
+		obj.SetManagedFields(nil)
+	}
+	return in, nil
 }

@@ -109,8 +109,10 @@ leader-election access (leases, and `create` and `patch` on Events, which
 record leader transitions) and read access to NetBoxSources, NetBoxMappings and
 Secrets, all in `netbox-provider-system`, and status writes on NetBoxSources.
 The manager's cache is scoped to that namespace with `--namespace`, so
-NetBoxSources in other namespaces are ignored. Secrets are fetched with `get`
-only and never cached. The namespace has Flux pruning disabled so uninstalling
+NetBoxSources in other namespaces are ignored. Secrets in that namespace are
+listed and watched as metadata only, with annotations and labels dropped, so a
+Secret change requeues the sources that name it; the token is fetched with an
+uncached `get` and never cached. The namespace has Flux pruning disabled so uninstalling
 a release cannot delete environment-owned sources, mappings or tokens.
 
 The manager holds one lease (`netbox-provider-manager.netbox.miloapis.com`) in
@@ -128,7 +130,7 @@ import, never the readiness of a Fleet record or of hardware.
 | Fleet convention | Here | Why |
 | --- | --- | --- |
 | `config/milo` root with CRDs, ProtectedResources and roles | None | The kinds stay on the local cluster; the IAM needed is Fleet's permission set and is proposed to Fleet. |
-| `fleet-system-private` namespace and private-record role | None | No private records. Token Secrets live in `netbox-provider-system` with get-only access. |
+| `fleet-system-private` namespace and private-record role | None | No private records. Token Secrets live in `netbox-provider-system` with read-only access; only their metadata is cached. |
 | Two Milo kubeconfigs (discovery and project) | One, `netbox-provider-fleet-kubeconfig` | The controller writes one known provider project; it discovers nothing. |
 | Root kubeconfig Secret `milo-configuration-kubeconfig` | Not used | The controller never needs root Milo access. |
 | `--private-namespace` scopes the private-record cache | `--namespace=netbox-provider-system` scopes the whole cache | Without it, reading NetBoxSources would need a cluster-wide role. |
