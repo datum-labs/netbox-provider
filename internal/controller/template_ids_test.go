@@ -159,6 +159,63 @@ var _ = Describe("template component IDs", func() {
 		Expect(h.source().Status.Plan.Update).To(BeZero())
 	})
 
+	It("moves one component between its template and instance IDs with one Device update each way", func() {
+		h := newHarness().withSourceAndToken(netboxv1alpha1.SourceModeCreate)
+		_, err := h.reconcile()
+		Expect(err).NotTo(HaveOccurred())
+		deviceKey, cableKey := fleet.KindDevice+"/"+deviceName, fleet.KindCable+"/"+cableName
+		typeName, _, _ := unstructured.NestedString(get(h.namespace, fleet.KindDevice, deviceName).Object, "spec", "deviceTypeRef", "name")
+		typeKey := fleet.KindDeviceType + "/" + typeName
+
+		var mu sync.Mutex
+		var seen []string
+		h.recorder.beforeApply = func(kind, name string) {
+			mu.Lock()
+			defer mu.Unlock()
+			seen = append(seen, dangling(h.namespace)...)
+		}
+		DeferCleanup(func() { h.recorder.beforeApply = nil })
+		at := testNow
+		for _, step := range []struct{ template, eth1 string }{
+			{"eth1 (renamed)", "interfaces-2001"},
+			{"eth1", "interface-templates-701"},
+		} {
+			By("renaming the eth1 template to " + step.template)
+			h.server.Set(netbox.CollectionInterfaceTemplates, 701, "name", step.template)
+			before := len(h.recorder.Applies())
+			at = at.Add(time.Hour)
+			h.r.Now = func() time.Time { return at }
+			_, err := h.reconcile()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(dangling(h.namespace)).To(BeEmpty())
+			mu.Lock()
+			Expect(seen).To(BeEmpty(), "a Cable named a component its Device did not have")
+			mu.Unlock()
+
+			// The Device is one Update, applied as its interim and then as
+			// planned; the Cable and the DeviceType are applied once.
+			writes := map[string]int{}
+			for _, key := range h.recorder.Applies()[before:] {
+				writes[key]++
+			}
+			Expect(writes).To(Equal(map[string]int{deviceKey: 2, cableKey: 1, typeKey: 1}))
+			s := h.source()
+			Expect(s.Status.Plan.Updated).To(Equal(int32(3)))
+			Expect(recordFor(s, "dcim/devices/1000", "Device").State).To(Equal(netboxv1alpha1.RecordStateUpdated))
+			Expect(componentIDs(get(h.namespace, fleet.KindDevice, deviceName))).To(ContainElement(step.eth1))
+			lanes, _, _ := unstructured.NestedSlice(get(h.namespace, fleet.KindCable, cableName).Object, "spec", "lanes")
+			Expect(lanes[0].(map[string]any)["a"].(map[string]any)["componentID"]).To(Equal(step.eth1))
+
+			// The next reconcile writes nothing.
+			before = len(h.recorder.Applies())
+			at = at.Add(time.Hour)
+			_, err = h.reconcile()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(h.recorder.Applies()[before:]).To(BeEmpty())
+			Expect(h.source().Status.Plan.Update).To(BeZero())
+		}
+	})
+
 	It("keeps the old components while a Cable that names them is not written", func() {
 		h := newHarness().withSourceAndToken(netboxv1alpha1.SourceModeCreate)
 		for _, t := range templates {
