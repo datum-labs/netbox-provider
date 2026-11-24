@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"go.miloapis.com/netbox-provider/internal/plan"
 	"k8s.io/apimachinery/pkg/runtime"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sync"
@@ -16,6 +17,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/rest"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -189,6 +191,8 @@ type harness struct {
 	server    *netboxtest.Server
 	recorder  *writeRecorder
 	r         *NetBoxSourceReconciler
+	// api records the requests of the manager startManager runs.
+	api *apiLog
 }
 
 // newHarness creates a namespace with the mapped Facility, the fixture
@@ -216,13 +220,65 @@ func (h *harness) withSourceAndToken(mode netboxv1alpha1.SourceMode) *harness {
 	return h
 }
 
+// apiRequest is one request the manager sent to the API server.
+type apiRequest struct {
+	Method, Path, Accept string
+	Watch                bool
+}
+
+// apiLog records the requests the manager sends.
+type apiLog struct {
+	mu       sync.Mutex
+	requests []apiRequest
+}
+
+func (l *apiLog) RoundTrip(next http.RoundTripper, req *http.Request) (*http.Response, error) {
+	l.mu.Lock()
+	l.requests = append(l.requests, apiRequest{
+		Method: req.Method, Path: req.URL.Path, Accept: req.Header.Get("Accept"), Watch: req.URL.Query().Get("watch") == "true",
+	})
+	l.mu.Unlock()
+	return next.RoundTrip(req)
+}
+
+// Requests returns the recorded requests that match.
+func (l *apiLog) Requests(match func(apiRequest) bool) []apiRequest {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var out []apiRequest
+	for _, r := range l.requests {
+		if match(r) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
 // startManager runs the reconciler under a manager with the operator's cache
-// options, scoped to the harness namespace, until the spec ends.
-func (h *harness) startManager() ctrl.Manager {
-	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
+// options, scoped to the harness namespace, until the spec ends. The
+// manager's requests to the API server are recorded in h.api. A non-zero
+// secretResync makes the Secret informer resync at that period.
+func (h *harness) startManager(secretResync ...time.Duration) ctrl.Manager {
+	h.api = &apiLog{}
+	mgrCfg := rest.CopyConfig(cfg)
+	mgrCfg.WrapTransport = func(next http.RoundTripper) http.RoundTripper {
+		return roundTripperFunc(func(req *http.Request) (*http.Response, error) { return h.api.RoundTrip(next, req) })
+	}
+	cacheOptions := CacheOptions(h.namespace)
+	for obj, byObject := range cacheOptions.ByObject {
+		if _, ok := obj.(*corev1.Secret); ok && len(secretResync) > 0 {
+			byObject.SyncPeriod = &secretResync[0]
+			cacheOptions.ByObject[obj] = byObject
+		}
+	}
+	mgr, err := ctrl.NewManager(mgrCfg, ctrl.Options{
 		Scheme:  testScheme,
 		Metrics: metricsserver.Options{BindAddress: "0"},
-		Cache:   CacheOptions(h.namespace),
+		Cache:   cacheOptions,
 		// Each spec starts its own manager with the same controller name.
 		Controller: ctrlconfig.Controller{SkipNameValidation: ptr.To(true)},
 	})

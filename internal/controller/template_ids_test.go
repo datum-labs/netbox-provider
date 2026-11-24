@@ -159,14 +159,114 @@ var _ = Describe("template component IDs", func() {
 		Expect(h.source().Status.Plan.Update).To(BeZero())
 	})
 
-	It("moves one component between its template and instance IDs with one Device update each way", func() {
+	type move struct {
+		name string
+		// change edits NetBox.
+		change func(h *harness)
+		// component is the moved component's NetBox name, and id its ID.
+		component, id string
+		// typeWritten is whether the DeviceType changes too.
+		typeWritten bool
+	}
+	// A template edit also updates the DeviceType; a component rename changes
+	// only the Device and its Cable.
+	DescribeTable("moves one component between its template and instance IDs with one Device update each way",
+		func(steps ...move) {
+			h := newHarness().withSourceAndToken(netboxv1alpha1.SourceModeCreate)
+			_, err := h.reconcile()
+			Expect(err).NotTo(HaveOccurred())
+			deviceKey, cableKey := fleet.KindDevice+"/"+deviceName, fleet.KindCable+"/"+cableName
+			typeName, _, _ := unstructured.NestedString(get(h.namespace, fleet.KindDevice, deviceName).Object, "spec", "deviceTypeRef", "name")
+			typeKey := fleet.KindDeviceType + "/" + typeName
+
+			var mu sync.Mutex
+			var seen []string
+			h.recorder.beforeApply = func(kind, name string) {
+				mu.Lock()
+				defer mu.Unlock()
+				seen = append(seen, dangling(h.namespace)...)
+			}
+			DeferCleanup(func() { h.recorder.beforeApply = nil })
+			at := testNow
+			for _, step := range steps {
+				By(step.name)
+				step.change(h)
+				before := len(h.recorder.Applies())
+				at = at.Add(time.Hour)
+				h.r.Now = func() time.Time { return at }
+				_, err := h.reconcile()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(dangling(h.namespace)).To(BeEmpty())
+				mu.Lock()
+				Expect(seen).To(BeEmpty(), "a Cable named a component its Device did not have")
+				mu.Unlock()
+
+				// The Device is one Update, applied as its interim and then as
+				// planned; the Cable, and the DeviceType when it changes, are
+				// applied once.
+				writes := map[string]int{}
+				for _, key := range h.recorder.Applies()[before:] {
+					writes[key]++
+				}
+				want := map[string]int{deviceKey: 2, cableKey: 1}
+				if step.typeWritten {
+					want[typeKey] = 1
+				}
+				Expect(writes).To(Equal(want))
+				s := h.source()
+				Expect(s.Status.Plan.Updated).To(Equal(int32(len(want))))
+				Expect(recordFor(s, "dcim/devices/1000", "Device").State).To(Equal(netboxv1alpha1.RecordStateUpdated))
+				comps, _, _ := unstructured.NestedSlice(get(h.namespace, fleet.KindDevice, deviceName).Object, "spec", "components")
+				var ids []string
+				for _, c := range comps {
+					if c.(map[string]any)["name"] == step.component {
+						ids = append(ids, c.(map[string]any)["id"].(string))
+					}
+				}
+				Expect(ids).To(Equal([]string{step.id}))
+				lanes, _, _ := unstructured.NestedSlice(get(h.namespace, fleet.KindCable, cableName).Object, "spec", "lanes")
+				Expect(lanes[0].(map[string]any)["a"].(map[string]any)["componentID"]).To(Equal(step.id))
+
+				// The next reconcile writes nothing.
+				before = len(h.recorder.Applies())
+				at = at.Add(time.Hour)
+				_, err = h.reconcile()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(h.recorder.Applies()[before:]).To(BeEmpty())
+				Expect(h.source().Status.Plan.Update).To(BeZero())
+			}
+		},
+		Entry("template renamed and back",
+			move{"renaming the eth1 template", func(h *harness) {
+				h.server.Set(netbox.CollectionInterfaceTemplates, 701, "name", "eth1 (renamed)")
+			}, "eth1", "interfaces-2001", true},
+			move{"undoing the rename", func(h *harness) { h.server.Set(netbox.CollectionInterfaceTemplates, 701, "name", "eth1") }, "eth1", "interface-templates-701", true},
+		),
+		Entry("template deleted and restored",
+			move{"deleting the eth1 template", func(h *harness) { h.server.Remove(netbox.CollectionInterfaceTemplates, 701) }, "eth1", "interfaces-2001", true},
+			move{"restoring it", func(h *harness) {
+				h.server.Add(netbox.CollectionInterfaceTemplates, map[string]any{
+					"id": float64(701), "device_type": map[string]any{"id": float64(500)}, "name": "eth1", "type": map[string]any{"value": "25gbase-x-sfp28"},
+				})
+			}, "eth1", "interface-templates-701", true},
+		),
+		Entry("component renamed in NetBox and back",
+			move{"renaming eth1 on the device", func(h *harness) { h.server.Set(netbox.CollectionInterfaces, 2001, "name", "uplink") }, "uplink", "interfaces-2001", false},
+			move{"undoing the rename", func(h *harness) { h.server.Set(netbox.CollectionInterfaces, 2001, "name", "eth1") }, "eth1", "interface-templates-701", false},
+		),
+	)
+
+	It("keeps another writer's field on the old component entry, and is quarantined until that writer lets go", func() {
 		h := newHarness().withSourceAndToken(netboxv1alpha1.SourceModeCreate)
 		_, err := h.reconcile()
 		Expect(err).NotTo(HaveOccurred())
-		deviceKey, cableKey := fleet.KindDevice+"/"+deviceName, fleet.KindCable+"/"+cableName
-		typeName, _, _ := unstructured.NestedString(get(h.namespace, fleet.KindDevice, deviceName).Object, "spec", "deviceTypeRef", "name")
-		typeKey := fleet.KindDeviceType + "/" + typeName
-
+		// An operator records an asset tag on the template-backed eth1.
+		tag := func(components []any) *unstructured.Unstructured {
+			return fleetObject(fleet.KindDevice, h.namespace, deviceName, map[string]any{"components": components})
+		}
+		Expect(k8sClient.Apply(ctx, client.ApplyConfigurationFromUnstructured(tag([]any{
+			map[string]any{"id": "interface-templates-701", "assetTag": "EXAMPLE-TAG-1"},
+		})), client.FieldOwner("example-operator"))).To(Succeed())
 		var mu sync.Mutex
 		var seen []string
 		h.recorder.beforeApply = func(kind, name string) {
@@ -175,45 +275,65 @@ var _ = Describe("template component IDs", func() {
 			seen = append(seen, dangling(h.namespace)...)
 		}
 		DeferCleanup(func() { h.recorder.beforeApply = nil })
-		at := testNow
-		for _, step := range []struct{ template, eth1 string }{
-			{"eth1 (renamed)", "interfaces-2001"},
-			{"eth1", "interface-templates-701"},
-		} {
-			By("renaming the eth1 template to " + step.template)
-			h.server.Set(netbox.CollectionInterfaceTemplates, 701, "name", step.template)
+		eth1 := func() map[string]map[string]any {
+			comps, _, _ := unstructured.NestedSlice(get(h.namespace, fleet.KindDevice, deviceName).Object, "spec", "components")
+			out := map[string]map[string]any{}
+			for _, c := range comps {
+				if c.(map[string]any)["name"] == "eth1" {
+					out[c.(map[string]any)["id"].(string)] = c.(map[string]any)
+				}
+			}
+			return out
+		}
+		reconcileAt := func(d time.Duration) map[string]int {
 			before := len(h.recorder.Applies())
-			at = at.Add(time.Hour)
-			h.r.Now = func() time.Time { return at }
+			h.r.Now = func() time.Time { return testNow.Add(d) }
 			_, err := h.reconcile()
 			Expect(err).NotTo(HaveOccurred())
 			Expect(dangling(h.namespace)).To(BeEmpty())
 			mu.Lock()
 			Expect(seen).To(BeEmpty(), "a Cable named a component its Device did not have")
 			mu.Unlock()
-
-			// The Device is one Update, applied as its interim and then as
-			// planned; the Cable and the DeviceType are applied once.
 			writes := map[string]int{}
 			for _, key := range h.recorder.Applies()[before:] {
 				writes[key]++
 			}
-			Expect(writes).To(Equal(map[string]int{deviceKey: 2, cableKey: 1, typeKey: 1}))
-			s := h.source()
-			Expect(s.Status.Plan.Updated).To(Equal(int32(3)))
-			Expect(recordFor(s, "dcim/devices/1000", "Device").State).To(Equal(netboxv1alpha1.RecordStateUpdated))
-			Expect(componentIDs(get(h.namespace, fleet.KindDevice, deviceName))).To(ContainElement(step.eth1))
-			lanes, _, _ := unstructured.NestedSlice(get(h.namespace, fleet.KindCable, cableName).Object, "spec", "lanes")
-			Expect(lanes[0].(map[string]any)["a"].(map[string]any)["componentID"]).To(Equal(step.eth1))
-
-			// The next reconcile writes nothing.
-			before = len(h.recorder.Applies())
-			at = at.Add(time.Hour)
-			_, err = h.reconcile()
-			Expect(err).NotTo(HaveOccurred())
-			Expect(h.recorder.Applies()[before:]).To(BeEmpty())
-			Expect(h.source().Status.Plan.Update).To(BeZero())
+			return writes
 		}
+		deviceKey, cableKey := fleet.KindDevice+"/"+deviceName, fleet.KindCable+"/"+cableName
+		typeName, _, _ := unstructured.NestedString(get(h.namespace, fleet.KindDevice, deviceName).Object, "spec", "deviceTypeRef", "name")
+
+		By("renaming the template, so eth1 moves to its instance ID")
+		h.server.Set(netbox.CollectionInterfaceTemplates, 701, "name", "eth1 (renamed)")
+		Expect(reconcileAt(time.Hour)).To(Equal(map[string]int{deviceKey: 2, cableKey: 1, fleet.KindDeviceType + "/" + typeName: 1}))
+		// Dropping the old entry would leave it with only the operator's
+		// asset tag, and Fleet requires a component's name and type, so the
+		// planned Device is rejected and the interim stays.
+		Expect(eth1()).To(HaveLen(2))
+		Expect(eth1()["interface-templates-701"]).To(HaveKeyWithValue("assetTag", "EXAMPLE-TAG-1"))
+		Expect(eth1()["interfaces-2001"]).NotTo(HaveKey("assetTag"), "another writer's field is not carried to the new ID")
+		s := h.source()
+		Expect(recordFor(s, "dcim/devices/1000", "Device")).To(SatisfyAll(
+			HaveField("State", netboxv1alpha1.RecordStateQuarantined), HaveField("Reason", "Rejected"),
+			HaveField("Message", ContainSubstring("Required value"))))
+		Expect(s.Status.InterimDevices).To(ConsistOf(SatisfyAll(HaveField("Name", deviceName), HaveField("WaitingFor", BeEmpty()))))
+		Expect(condition(s, ConditionCableReferencesDelivered).Reason).To(Equal(ReasonInterimDevices))
+
+		By("reconciling again while the operator keeps its field")
+		Expect(reconcileAt(2 * time.Hour)).To(Equal(map[string]int{deviceKey: 1}))
+		Expect(eth1()).To(HaveLen(2))
+		s = h.source()
+		Expect(recordFor(s, "dcim/devices/1000", "Device").Reason).To(Equal("Rejected"))
+		Expect(condition(s, ConditionReady).Reason).To(Equal(ReasonReviewRequired))
+		Expect(s.Status.InterimDeviceCount).To(BeZero(), "the Device is no longer staged; its quarantine is what reports it")
+		Expect(condition(s, ConditionCableReferencesDelivered).Status).To(BeEquivalentTo("True"), "every Cable names a component the Device has")
+
+		By("the operator releasing its field")
+		Expect(k8sClient.Apply(ctx, client.ApplyConfigurationFromUnstructured(tag([]any{})), client.FieldOwner("example-operator"))).To(Succeed())
+		Expect(reconcileAt(3 * time.Hour)).To(Equal(map[string]int{deviceKey: 1}))
+		Expect(eth1()).To(SatisfyAll(HaveLen(1), HaveKey("interfaces-2001")))
+		Expect(recordFor(h.source(), "dcim/devices/1000", "Device").State).To(Equal(netboxv1alpha1.RecordStateUpdated))
+		Expect(reconcileAt(4 * time.Hour)).To(BeEmpty())
 	})
 
 	It("keeps the old components while a Cable that names them is not written", func() {

@@ -3,6 +3,8 @@
 package plan_test
 
 import (
+	"maps"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -355,7 +357,7 @@ func TestTemplateChangesMoveComponentIDsInOneDeviceUpdate(t *testing.T) {
 	deviceKey := fleet.KindDevice + "/" + plan.Name(key(plan.TypeDevice, "1000"), fleet.KindDevice)
 	cableKey := fleet.KindCable + "/" + plan.Name(key(plan.TypeCable, "5000"), fleet.KindCable)
 	typeKey := fleet.KindDeviceType + "/" + plan.Name(key(plan.TypeDeviceType, "500"), fleet.KindDeviceType)
-	renameEth1 := func(name string) func(plan.Input) {
+	renameTemplate := func(name string) func(plan.Input) {
 		return func(in plan.Input) {
 			for i := range in.Snapshot.Templates[netbox.CollectionInterfaceTemplates] {
 				if tmpl := &in.Snapshot.Templates[netbox.CollectionInterfaceTemplates][i]; tmpl.ID == 701 {
@@ -364,73 +366,101 @@ func TestTemplateChangesMoveComponentIDsInOneDeviceUpdate(t *testing.T) {
 			}
 		}
 	}
-	duplicateEth1 := func(in plan.Input) {
+	deleteTemplate := func(in plan.Input) {
+		templates := in.Snapshot.Templates[netbox.CollectionInterfaceTemplates]
+		in.Snapshot.Templates[netbox.CollectionInterfaceTemplates] = slices.DeleteFunc(slices.Clone(templates), func(t netbox.ComponentTemplate) bool { return t.ID == 701 })
+	}
+	duplicateTemplate := func(in plan.Input) {
 		addTemplate(in, netbox.CollectionInterfaceTemplates, netbox.ComponentTemplate{ID: 705, DeviceType: &netbox.Ref{ID: 500}, Name: "eth1", Type: &netbox.Choice{Value: "25gbase-x-sfp28"}})
 	}
-
-	// Each step changes the templates from the step before, starting from the
-	// fixture fully applied with template IDs.
-	steps := []struct {
-		name   string
-		change func(plan.Input)
-		eth1   string
-	}{
-		{"template renamed: eth1 falls back to its instance ID", renameEth1("eth1 (renamed)"), "interfaces-2001"},
-		{"rename undone: eth1 takes the template ID again", renameEth1("eth1"), "interface-templates-701"},
-		{"second eth1 template added: eth1 falls back to its instance ID", duplicateEth1, "interfaces-2001"},
+	renameComponent := func(name string) func(plan.Input) {
+		return func(in plan.Input) {
+			for i := range in.Snapshot.Components[netbox.CollectionInterfaces] {
+				if c := &in.Snapshot.Components[netbox.CollectionInterfaces][i]; c.ID == 2001 {
+					c.Name = name
+				}
+			}
+		}
 	}
-	state := fleetState{}
-	state.applyPlan(t, plan.Build(input(t)))
-	var changes []func(plan.Input)
-	for i, step := range steps {
-		changes = append(changes, step.change)
-		build := func() *plan.Plan {
-			in := input(t)
-			in.Snapshot.ObservedAt = observedAt.Add(time.Duration(i+1) * time.Hour)
-			for _, change := range changes {
-				change(in)
-			}
-			return plan.Build(state.existing(in))
-		}
+	// A template change also updates the DeviceType; a component rename
+	// changes only the Device and its Cable. The staged Device is applied
+	// twice: its interim, then as planned.
+	templateEdit := map[string]int{deviceKey: 2, cableKey: 1, typeKey: 1}
+	componentEdit := map[string]int{deviceKey: 2, cableKey: 1}
+	type step struct {
+		name string
+		// change is the NetBox state of this step, from the fixture.
+		change func(plan.Input)
+		// component is the moved component's NetBox name, and id its ID.
+		component, id string
+		writes        map[string]int
+	}
+	scenarios := map[string][]step{
+		"template renamed and back": {
+			{"renamed", renameTemplate("eth1 (renamed)"), "eth1", "interfaces-2001", templateEdit},
+			{"rename undone", renameTemplate("eth1"), "eth1", "interface-templates-701", templateEdit},
+		},
+		"template deleted and restored": {
+			{"deleted", deleteTemplate, "eth1", "interfaces-2001", templateEdit},
+			{"restored", func(plan.Input) {}, "eth1", "interface-templates-701", templateEdit},
+		},
+		"second template with the same name": {
+			{"duplicate added", duplicateTemplate, "eth1", "interfaces-2001", templateEdit},
+		},
+		"component renamed in NetBox and back": {
+			{"renamed", renameComponent("uplink"), "uplink", "interfaces-2001", componentEdit},
+			{"rename undone", renameComponent("eth1"), "eth1", "interface-templates-701", componentEdit},
+		},
+	}
+	for scenario, steps := range scenarios {
+		t.Run(scenario, func(t *testing.T) {
+			// Start from the fixture fully applied with template IDs.
+			state := fleetState{}
+			state.applyPlan(t, plan.Build(input(t)))
+			for i, step := range steps {
+				build := func() *plan.Plan {
+					in := input(t)
+					in.Snapshot.ObservedAt = observedAt.Add(time.Duration(i+1) * time.Hour)
+					step.change(in)
+					return plan.Build(state.existing(in))
+				}
+				p := build()
+				var updated []string
+				for _, c := range p.Candidates {
+					if c.Action == plan.ActionUpdate {
+						updated = append(updated, c.Key())
+					}
+				}
+				want := slices.Sorted(maps.Keys(step.writes))
+				sort.Strings(updated)
+				if !equalJSON(updated, want) {
+					t.Fatalf("%s: updates %v, want %v", step.name, updated, want)
+				}
+				// Every write is checked for Cables naming missing components.
+				if writes := state.applyPlan(t, p); !equalJSON(writes, step.writes) {
+					t.Fatalf("%s: writes %v, want %v", step.name, writes, step.writes)
+				}
+				device := state[deviceKey]
+				comps, _, _ := unstructured.NestedSlice(device.Object, "spec", "components")
+				var ids []string
+				for _, c := range comps {
+					if c.(map[string]any)["name"] == step.component {
+						ids = append(ids, c.(map[string]any)["id"].(string))
+					}
+				}
+				if !equalJSON(ids, []string{step.id}) {
+					t.Fatalf("%s: %s has IDs %v, want %s", step.name, step.component, ids, step.id)
+				}
+				lanes, _, _ := unstructured.NestedSlice(state[cableKey].Object, "spec", "lanes")
+				if got := lanes[0].(map[string]any)["a"].(map[string]any)["componentID"]; got != step.id {
+					t.Fatalf("%s: Cable names %v, want %s", step.name, got, step.id)
+				}
 
-		p := build()
-		writes := state.applyPlan(t, p)
-		var updated []string
-		for _, c := range p.Candidates {
-			if c.Action == plan.ActionUpdate {
-				updated = append(updated, c.Key())
+				// The next plan from the same NetBox writes nothing.
+				if next := build(); next.Count(plan.ActionCreate)+next.Count(plan.ActionUpdate) != 0 {
+					t.Fatalf("%s: the next plan writes %d creates and %d updates", step.name, next.Count(plan.ActionCreate), next.Count(plan.ActionUpdate))
+				}
 			}
-		}
-		want := []string{cableKey, deviceKey, typeKey}
-		sort.Strings(updated)
-		sort.Strings(want)
-		if !equalJSON(updated, want) {
-			t.Fatalf("%s: updates %v, want %v", step.name, updated, want)
-		}
-		// One Device Update, staged as two applies: the interim keeps the ID
-		// the Cable names until the Cable moves.
-		if writes[deviceKey] != 2 || writes[cableKey] != 1 || writes[typeKey] != 1 || len(writes) != 3 {
-			t.Fatalf("%s: writes %v", step.name, writes)
-		}
-		device := state[deviceKey]
-		comps, _, _ := unstructured.NestedSlice(device.Object, "spec", "components")
-		var eth1 []string
-		for _, c := range comps {
-			if c.(map[string]any)["name"] == "eth1" {
-				eth1 = append(eth1, c.(map[string]any)["id"].(string))
-			}
-		}
-		if !equalJSON(eth1, []string{step.eth1}) {
-			t.Fatalf("%s: eth1 has IDs %v, want %s", step.name, eth1, step.eth1)
-		}
-		lanes, _, _ := unstructured.NestedSlice(state[cableKey].Object, "spec", "lanes")
-		if got := lanes[0].(map[string]any)["a"].(map[string]any)["componentID"]; got != step.eth1 {
-			t.Fatalf("%s: Cable names %v, want %s", step.name, got, step.eth1)
-		}
-
-		// The next plan from the same NetBox writes nothing.
-		if next := build(); next.Count(plan.ActionCreate)+next.Count(plan.ActionUpdate) != 0 {
-			t.Fatalf("%s: the next plan writes %d creates and %d updates", step.name, next.Count(plan.ActionCreate), next.Count(plan.ActionUpdate))
-		}
+		})
 	}
 }

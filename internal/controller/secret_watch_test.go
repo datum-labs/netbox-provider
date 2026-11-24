@@ -3,6 +3,8 @@
 package controller
 
 import (
+	"net/http"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -33,6 +35,13 @@ func labelSecret(namespace, name, value string) {
 	Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, &secret)).To(Succeed())
 	secret.Labels = map[string]string{"example.com/touched": value}
 	Expect(k8sClient.Update(ctx, &secret)).To(Succeed())
+}
+
+// secretGet matches a get of one Secret.
+func secretGet(namespace, name string) func(apiRequest) bool {
+	return func(r apiRequest) bool {
+		return r.Method == http.MethodGet && r.Path == "/api/v1/namespaces/"+namespace+"/secrets/"+name
+	}
 }
 
 // settledRequests waits until the reconciles the manager queued at start have
@@ -78,7 +87,7 @@ var _ = Describe("token Secret watch", func() {
 		Expect(condition(h.source(), ConditionReady).Reason).To(Equal(ReasonTokenRejected))
 	})
 
-	It("enqueues nothing for a Secret no source references, and the source for its own Secret", func() {
+	It("enqueues nothing for a Secret no source references, nor for a metadata edit that keeps the token, and the source when its token changes", func() {
 		h := newHarness().withSourceAndToken("")
 		unrelated := tokenSecret(h.namespace, "token", "synthetic-unrelated-value")
 		unrelated.Name = "unrelated"
@@ -95,7 +104,50 @@ var _ = Describe("token Secret watch", func() {
 		Consistently(h.server.Requests, 3*time.Second).Should(Equal(requests), "an unrelated Secret enqueues nothing")
 
 		labelSecret(h.namespace, "netbox-token", "once")
-		Eventually(h.server.Requests, 20*time.Second).Should(BeNumerically(">", requests), "the referenced Secret enqueues its source")
+		Consistently(h.server.Requests, 3*time.Second).Should(Equal(requests), "a metadata edit that keeps the token reads nothing from NetBox")
+		Expect(h.api.Requests(secretGet(h.namespace, "netbox-token"))).NotTo(BeEmpty(), "the watch read the token to compare it")
+
+		h.setToken(rotatedToken)
+		Eventually(h.server.Requests, 20*time.Second).Should(BeNumerically(">", requests), "a new token enqueues its source")
+		Expect(h.server.Authorizations()[len(h.server.Authorizations())-1]).To(Equal("Bearer " + rotatedToken))
+	})
+
+	It("lists and watches Secrets only as metadata, never as typed Secrets", func() {
+		h := newHarness().withSourceAndToken("")
+		mgr := h.startManager()
+		cached := &metav1.PartialObjectMetadata{}
+		cached.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("Secret"))
+		Eventually(func() error {
+			return mgr.GetCache().Get(ctx, types.NamespacedName{Namespace: h.namespace, Name: "netbox-token"}, cached)
+		}, 20*time.Second).Should(Succeed())
+		Eventually(func() string { return condition(h.source(), ConditionApplied).Reason }, 20*time.Second).Should(Equal(ReasonObserveOnly))
+
+		// An informer lists and watches the collection. A metadata informer
+		// asks for PartialObjectMetadata; a typed one would ask for Secrets.
+		collection := h.api.Requests(func(r apiRequest) bool {
+			return r.Method == http.MethodGet && strings.HasSuffix(r.Path, "/secrets")
+		})
+		Expect(collection).NotTo(BeEmpty(), "the Secret informer listed and watched")
+		Expect(collection).To(ContainElement(HaveField("Watch", true)))
+		for _, r := range collection {
+			Expect(r.Path).To(Equal("/api/v1/namespaces/"+h.namespace+"/secrets"), "Secrets are listed only in the manager's namespace")
+			Expect(r.Accept).To(ContainSubstring("as=PartialObjectMetadata"), "a Secret list or watch asked for full Secrets: %+v", r)
+		}
+	})
+
+	It("ignores Secret resyncs, which carry no change", func() {
+		h := newHarness().withSourceAndToken("")
+		h.startManager(200 * time.Millisecond)
+		Eventually(func() string { return condition(h.source(), ConditionApplied).Reason }, 20*time.Second).Should(Equal(ReasonObserveOnly))
+		settledRequests(h)
+		// Each event for the referenced Secret makes the watch read it, so
+		// resyncs that passed the predicate would show up here.
+		gets := func() int { return len(h.api.Requests(secretGet(h.namespace, "netbox-token"))) }
+		before := gets()
+		Consistently(gets, 3*time.Second).Should(Equal(before), "a resync enqueued work")
+
+		labelSecret(h.namespace, "netbox-token", "once")
+		Eventually(gets, 10*time.Second).Should(BeNumerically(">", before), "a real change still reaches the watch")
 	})
 
 	It("caches Secret metadata only, without annotations or data", func() {

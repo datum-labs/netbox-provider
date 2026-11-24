@@ -102,11 +102,20 @@ until the Cable is fixed.
    `waitingFor`. Fix what blocks it, such as an apply conflict or a missing
    `patch` permission. Outcomes that are only unknown clear on a later
    reconcile.
-2. For an undelivered reference, decide what the Cable should be. Restore it
+2. An interim Device with an empty `waitingFor` had its planned apply fail.
+   If its `status.records` row is `Quarantined/Rejected`, and Fleet's message
+   says a component's `name` and `type` are required, another writer owns a
+   field on the component entry the move drops, such as an `assetTag`. Ask
+   that writer to move the field to the new component ID, or release it. The
+   next reconcile then removes the old entry. Until then the Device stays
+   quarantined and `Ready` is `False`. After the first reconcile it is no
+   longer listed as interim, so the interim alert below does not fire for
+   it.
+3. For an undelivered reference, decide what the Cable should be. Restore it
    in NetBox, or review its medium, so the controller writes it again. If
    another writer owns it, update it there to the component ID the Device
    now has.
-3. Do not edit the Device's components by hand. The next Create-mode apply
+4. Do not edit the Device's components by hand. The next Create-mode apply
    restores what NetBox records.
 
 **Suggested alerts.** This repository ships no alert rules. These expressions

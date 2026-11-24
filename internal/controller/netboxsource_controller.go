@@ -123,10 +123,20 @@ type NetBoxSourceReconciler struct {
 	// NewReader builds the NetBox reader; nil uses netbox.New.
 	NewReader func(netbox.Config) (netbox.Reader, error)
 
-	// rejected remembers, per source, the token NetBox last rejected, so a
-	// Secret event that leaves the token unchanged does not send it again.
-	rejectedMu sync.Mutex
-	rejected   map[types.NamespacedName]rejection
+	// tokensMu guards rejected and used. rejected remembers, per source, the
+	// token NetBox last rejected, so a reconcile does not send it again before
+	// its retry time. used remembers the token each source's last reconcile
+	// resolved, so a Secret event that leaves it unchanged enqueues nothing.
+	tokensMu sync.Mutex
+	rejected map[types.NamespacedName]rejection
+	used     map[types.NamespacedName]tokenUse
+}
+
+// tokenUse is the token a reconcile of one generation of a source resolved.
+// Only its digest is kept, in memory; it never reaches status or logs.
+type tokenUse struct {
+	generation int64
+	digest     [sha256.Size]byte
 }
 
 // rejection is a token NetBox rejected. Only its digest is kept, in memory;
@@ -152,6 +162,8 @@ func (r *NetBoxSourceReconciler) Reconcile(ctx context.Context, req reconcile.Re
 	if err := r.Client.Get(ctx, req.NamespacedName, &source); err != nil {
 		if apierrors.IsNotFound(err) {
 			forgetSourceMetrics(req.NamespacedName)
+			r.rememberUsed(req.NamespacedName, 0, "")
+			r.forgetRejected(req.NamespacedName)
 		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
@@ -180,8 +192,10 @@ func (r *NetBoxSourceReconciler) Reconcile(ctx context.Context, req reconcile.Re
 		set(ConditionApplied, metav1.ConditionUnknown, ReasonNotAttempted, "configuration is unresolved")
 		set(ConditionCableReferencesDelivered, metav1.ConditionUnknown, ReasonNotAttempted, "configuration is unresolved")
 		set(ConditionReady, metav1.ConditionFalse, reason, message)
+		r.rememberUsed(req.NamespacedName, source.Generation, "")
 		return ctrl.Result{RequeueAfter: pollInterval}, r.updateStatus(ctx, &source)
 	}
+	r.rememberUsed(req.NamespacedName, source.Generation, token)
 	// A token NetBox rejected is not sent again before its retry time, whatever
 	// triggered this reconcile, unless the token or the spec changed.
 	if wait := r.rejectedFor(req.NamespacedName, source.Generation, token); wait > 0 {
@@ -328,8 +342,8 @@ func interval(source netboxv1alpha1.NetBoxSource) time.Duration {
 // rejectedFor returns how long the token must still wait when NetBox rejected
 // this same token for this generation of the source, and zero otherwise.
 func (r *NetBoxSourceReconciler) rejectedFor(key types.NamespacedName, generation int64, token string) time.Duration {
-	r.rejectedMu.Lock()
-	defer r.rejectedMu.Unlock()
+	r.tokensMu.Lock()
+	defer r.tokensMu.Unlock()
 	rej, ok := r.rejected[key]
 	if !ok || rej.generation != generation || rej.digest != sha256.Sum256([]byte(token)) {
 		return 0
@@ -338,17 +352,40 @@ func (r *NetBoxSourceReconciler) rejectedFor(key types.NamespacedName, generatio
 }
 
 func (r *NetBoxSourceReconciler) rememberRejected(key types.NamespacedName, generation int64, token string, retry time.Duration) {
-	r.rejectedMu.Lock()
-	defer r.rejectedMu.Unlock()
+	r.tokensMu.Lock()
+	defer r.tokensMu.Unlock()
 	if r.rejected == nil {
 		r.rejected = map[types.NamespacedName]rejection{}
 	}
 	r.rejected[key] = rejection{generation: generation, digest: sha256.Sum256([]byte(token)), retryAt: r.now().Add(retry)}
 }
 
+// rememberUsed records the token a reconcile resolved; "" records none.
+func (r *NetBoxSourceReconciler) rememberUsed(key types.NamespacedName, generation int64, token string) {
+	r.tokensMu.Lock()
+	defer r.tokensMu.Unlock()
+	if token == "" {
+		delete(r.used, key)
+		return
+	}
+	if r.used == nil {
+		r.used = map[types.NamespacedName]tokenUse{}
+	}
+	r.used[key] = tokenUse{generation: generation, digest: sha256.Sum256([]byte(token))}
+}
+
+// tokenUnchanged reports whether the last reconcile of this generation of the
+// source resolved this same token.
+func (r *NetBoxSourceReconciler) tokenUnchanged(key types.NamespacedName, generation int64, token string) bool {
+	r.tokensMu.Lock()
+	defer r.tokensMu.Unlock()
+	use, ok := r.used[key]
+	return ok && use.generation == generation && use.digest == sha256.Sum256([]byte(token))
+}
+
 func (r *NetBoxSourceReconciler) forgetRejected(key types.NamespacedName) {
-	r.rejectedMu.Lock()
-	defer r.rejectedMu.Unlock()
+	r.tokensMu.Lock()
+	defer r.tokensMu.Unlock()
 	delete(r.rejected, key)
 }
 
@@ -378,19 +415,29 @@ func (r *NetBoxSourceReconciler) resolve(ctx context.Context, source *netboxv1al
 		}
 		return nil, "", "", "", err
 	}
+	token, reason, message := secretToken(&secret, ref)
+	if reason != "" {
+		return nil, "", reason, message, nil
+	}
+	return &mapping, token, "", "", nil
+}
+
+// secretToken returns the token ref names in secret, or the reason and
+// message it is unusable.
+func secretToken(secret *corev1.Secret, ref netboxv1alpha1.SecretKeyReference) (string, string, string) {
 	keyName := ref.Key
 	if keyName == "" {
 		keyName = "token"
 	}
 	value, ok := secret.Data[keyName]
 	if !ok {
-		return nil, "", ReasonSecretKeyMissing, fmt.Sprintf("Secret %q has no key %q", ref.Name, keyName), nil
+		return "", ReasonSecretKeyMissing, fmt.Sprintf("Secret %q has no key %q", ref.Name, keyName)
 	}
 	token := strings.TrimSpace(string(value))
 	if token == "" || strings.ContainsAny(token, " \t\r\n") {
-		return nil, "", ReasonTokenInvalid, fmt.Sprintf("Secret %q key %q is empty or contains whitespace", ref.Name, keyName), nil
+		return "", ReasonTokenInvalid, fmt.Sprintf("Secret %q key %q is empty or contains whitespace", ref.Name, keyName)
 	}
-	return &mapping, token, "", "", nil
+	return token, "", ""
 }
 
 func (r *NetBoxSourceReconciler) newReader(spec netboxv1alpha1.NetBoxSourceSpec, token string) (netbox.Reader, error) {
@@ -869,25 +916,46 @@ func (r *NetBoxSourceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 }
 
 func (r *NetBoxSourceReconciler) sourcesForMapping(ctx context.Context, obj client.Object) []reconcile.Request {
-	return r.sourcesReferencing(ctx, mappingIndex, obj)
+	var requests []reconcile.Request
+	for _, s := range r.sourcesReferencing(ctx, mappingIndex, obj) {
+		requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&s)})
+	}
+	return requests
 }
 
+// sourcesForSecret returns the sources that name the Secret, except those
+// whose last reconcile, of their current generation, resolved the token the
+// Secret now holds: a change to the Secret's metadata alone reads nothing from
+// NetBox. The token is read with an uncached get, only when a source names
+// the Secret. A Secret that cannot be read enqueues every source naming it.
 func (r *NetBoxSourceReconciler) sourcesForSecret(ctx context.Context, obj client.Object) []reconcile.Request {
-	return r.sourcesReferencing(ctx, secretIndex, obj)
+	sources := r.sourcesReferencing(ctx, secretIndex, obj)
+	if len(sources) == 0 {
+		return nil
+	}
+	var secret corev1.Secret
+	err := r.APIReader.Get(ctx, client.ObjectKeyFromObject(obj), &secret)
+	var requests []reconcile.Request
+	for i := range sources {
+		key := client.ObjectKeyFromObject(&sources[i])
+		if err == nil {
+			if token, reason, _ := secretToken(&secret, sources[i].Spec.TokenSecretRef); reason == "" && r.tokenUnchanged(key, sources[i].Generation, token) {
+				continue
+			}
+		}
+		requests = append(requests, reconcile.Request{NamespacedName: key})
+	}
+	return requests
 }
 
 // sourcesReferencing returns the sources in obj's namespace whose index field
 // names obj.
-func (r *NetBoxSourceReconciler) sourcesReferencing(ctx context.Context, index string, obj client.Object) []reconcile.Request {
+func (r *NetBoxSourceReconciler) sourcesReferencing(ctx context.Context, index string, obj client.Object) []netboxv1alpha1.NetBoxSource {
 	var sources netboxv1alpha1.NetBoxSourceList
 	if err := r.Client.List(ctx, &sources, client.InNamespace(obj.GetNamespace()), client.MatchingFields{index: obj.GetName()}); err != nil {
 		return nil
 	}
-	requests := make([]reconcile.Request, 0, len(sources.Items))
-	for _, s := range sources.Items {
-		requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&s)})
-	}
-	return requests
+	return sources.Items
 }
 
 // CacheOptions returns the manager cache options. A non-empty namespace scopes

@@ -49,6 +49,11 @@ func TestUndeliveredReferences(t *testing.T) {
 	if refs := plan.UndeliveredReferences(p, in.Existing, landed(fleet.KindCable+"/"+cable), held); len(refs) != 0 {
 		t.Fatalf("interim Device %v", refs)
 	}
+	// The interim landed but the planned Device was rejected: Fleet still
+	// holds the interim, so the moved Cable names a component it has.
+	if refs := plan.UndeliveredReferences(p, in.Existing, landed(server.Key()), held); len(refs) != 0 {
+		t.Fatalf("interim Device whose planned apply failed %v", refs)
+	}
 	// Without the interim, the Cable names a component the Device dropped.
 	want := []plan.CableReference{{Cable: cable, Device: device, ComponentID: "interfaces-2001"}}
 	if refs := plan.UndeliveredReferences(p, in.Existing, landed(fleet.KindCable+"/"+cable), nil); !equalJSON(refs, want) {

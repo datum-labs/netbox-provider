@@ -23,8 +23,10 @@ type CableReference struct {
 // UndeliveredReferences returns each Cable endpoint that names a component
 // its Device lacks once p's writes land, for the Devices p plans. written
 // reports whether a candidate's write landed, or would land in Observe mode.
-// A written Device has its planned components, or its interim ones when
-// interim holds its key; any other Device keeps its components in existing.
+// A Device whose key interim holds has its interim components, since its
+// interim landed even when its planned apply then failed. Any other written
+// Device has its planned components, and the rest keep their components in
+// existing.
 // A written Cable has its planned lanes, and any other Cable keeps its lanes
 // in existing. Devices this plan does not have as candidates are not checked.
 // The result is sorted by Cable, Device and component.
@@ -42,11 +44,12 @@ func UndeliveredReferences(p *Plan, existing Existing, written func(*Candidate) 
 		switch c.Kind {
 		case fleet.KindDevice:
 			obj := devices[c.Name]
-			if written(c) {
+			switch {
+			case interim[c.Key()] && c.Interim != nil:
+				// The interim landed, whether or not the planned apply did.
+				obj = c.Interim
+			case written(c):
 				obj = c.Object
-				if interim[c.Key()] && c.Interim != nil {
-					obj = c.Interim
-				}
 			}
 			if obj == nil {
 				continue
